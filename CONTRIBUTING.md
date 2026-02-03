@@ -2,6 +2,8 @@
 
 ## To-do
 
+- [ ] add likelihood ratio test from HAWK paper?
+
 - [ ] add file does not exist errors for call subcommand
 
 - [x] bug for variants within k of chromosome start? Why doesn't test data work anymore?
