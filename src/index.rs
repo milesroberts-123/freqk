@@ -178,6 +178,18 @@ pub fn index_workflow(vcf_path: &String, fasta_path: &String, output_path: &Stri
         }
         // check if REF allele matches fasta file
         if var_seqs[0] != seq_string {
+            // If the only mismatches are positions where the FASTA has N (from IUPAC ambiguity
+            // codes like Y, W, M, etc. that stand_seq() converts to N), skip gracefully.
+            // k-mers containing N are discarded downstream anyway, so these variants contribute
+            // nothing to the index regardless.
+            let n_mismatch_only = seq_string.chars().zip(var_seqs[0].chars())
+                .all(|(f, v)| f == v || f == 'N');
+            if n_mismatch_only {
+                log::warn!("Skipping variant at CHROM: {} POS: {} — FASTA has N (IUPAC ambiguity code) where VCF REF has '{}'. k-mers with N are skipped downstream anyway.", chrom, pos, &alleles_list[0]);
+                pos_prev = pos;
+                chrom_prev = chrom.to_string();
+                continue;
+            }
             log::error!("REF allele does not match FASTA at CHROM: {} POS: {}\nFASTA : {}\nVCF   : {}\nREGION: {} \nREF: {}\nWas the FASTA used as the reference to make the VCF?", chrom, pos, &seq_string, &var_seqs[0], region_start.to_string() + "-" + &region_end.to_string(),&alleles_list[0]);
             panic!();
         }
