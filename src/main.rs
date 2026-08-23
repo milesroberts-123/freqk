@@ -6,6 +6,7 @@ mod index;
 mod dedup;
 mod count;
 mod call;
+mod simulate;
 mod hetmers;
 
 #[derive(Debug, Parser)]
@@ -81,6 +82,15 @@ enum Commands {
         #[command(flatten)]
         verbosity: clap_verbosity_flag::Verbosity,
     },
+    Simulate {
+        #[arg(short, long, help = "genome length to simulate")]
+        length: usize,
+        #[arg(short, long, help = "Mutation rate")]
+        snp: f64,
+        #[arg(short, long, help = "Zeta distribution shape")]
+        shape: f64,
+        #[command(flatten)]                                                                                                         verbosity: clap_verbosity_flag::Verbosity,
+    },
     /// Count het-mers
     Hetmers {
         /// kmer count table file name
@@ -149,6 +159,11 @@ fn main() {
             verbosity.log_level_filter();
             log::info!("Converting counts to allele frequencies: {} {} {}", index, counts, output);
             let _ = call::call_from_counts(index, counts, output);
+        }
+        Commands::Simulate { length, snp, shape, verbosity } => {
+            verbosity.log_level_filter();
+            log::info!("Simulating a genome with structural variants.");
+            let _ = simulate::simulate_workflow(length, snp, shape);
         }
         Commands::Hetmers { inputs, outputs, minimums, alleles, coverages, pools, alphas, betas, sigmas, verbosity } => {
             verbosity.log_level_filter();
