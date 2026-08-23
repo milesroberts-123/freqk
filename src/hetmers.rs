@@ -3,24 +3,24 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 
-mod freq_from_hetmers;
-mod input_checkers;
+use crate::common;
 
-/// Read a k-mer count table (two tab-separated columns) into parallel vectors.
-fn load_kmers(input: &str, minimum: usize) -> (Vec<String>, Vec<usize>) {
-    println!("Loading k-mer count file {}...", input);
+mod freq_from_hetmers;
+
+/// Read a k-mer count table (two tab-separated columns) into (sequence, count) pairs.
+fn load_kmers(input: &str, minimum: usize) -> Vec<(String, usize)> {
+    log::info!("Loading k-mer count file {}...", input);
     let file = File::open(input).expect("Unable to open file");
     let reader = BufReader::new(file);
-    let mut seqs = Vec::new();
-    let mut counts = Vec::new();
+    let mut kmers = Vec::new();
 
     for line in reader.lines() {
         let line = line.expect("Unable to read line");
         let parts: Vec<&str> = line.split('\t').collect();
 
         if parts.len() != 2 {
-            println!("Skipping line that does not have two tab-separated columns:");
-            println!("{}", line);
+            log::warn!("Skipping line that does not have two tab-separated columns:");
+            log::warn!("{}", line);
             continue;
         }
 
@@ -28,18 +28,55 @@ fn load_kmers(input: &str, minimum: usize) -> (Vec<String>, Vec<usize>) {
         let count: usize = parts[1].parse().expect("Invalid count value");
 
         if count >= minimum {
-            seqs.push(seq);
-            counts.push(count);
+            kmers.push((seq, count));
         }
     }
 
-    (seqs, counts)
+    kmers
+}
+
+/// Check that k-mers are lexicographically sorted (first 1000 elements).
+fn check_sort(seqs: &[String]) -> bool {
+    let limit = seqs.len().min(1000);
+    let seqs_sub = &seqs[..limit];
+
+    let mut sorted_seqs = seqs_sub.to_vec();
+    sorted_seqs.sort();
+
+    let result = seqs_sub == sorted_seqs;
+
+    log::info!("Input sorted: {}", result);
+    result
+}
+
+/// Check that only ATGC are in the alphabet (first 1000 elements).
+fn check_letters(seqs: &[String]) -> bool {
+    let limit = seqs.len().min(1000);
+    let seqs_sub = &seqs[..limit];
+
+    let result = seqs_sub
+        .iter()
+        .all(|seq| seq.chars().all(|c| matches!(c, 'A' | 'T' | 'G' | 'C')));
+    log::info!("Only ATGC: {}", result);
+    result
+}
+
+/// Run all input checks, panicking on failure.
+fn all_checks(seqs: &[String]) {
+    log::info!("Checking input format...");
+    if !check_sort(seqs) {
+        panic!("Input k-mers are not lexicographically sorted");
+    }
+
+    if !check_letters(seqs) {
+        panic!("Input k-mers contain characters other than ATGC")
+    }
 }
 
 /// Remove the central base from each k-mer.
 fn extract_border(seqs: &[String]) -> Vec<String> {
     let k = seqs[0].len();
-    println!("k is {}", k);
+    log::info!("k is {}", k);
     let k_half = k / 2;
 
     seqs.iter()
@@ -49,22 +86,13 @@ fn extract_border(seqs: &[String]) -> Vec<String> {
 
 /// Reverse complement each sequence.
 fn rev_comp(seqs: &[String]) -> Vec<String> {
-    println!("Reverse complementing...");
-    let complement = |c: char| match c {
-        'A' => 'T',
-        'T' => 'A',
-        'C' => 'G',
-        'G' => 'C',
-        _ => c,
-    };
-    seqs.iter()
-        .map(|s| s.chars().rev().map(complement).collect())
-        .collect()
+    log::debug!("Reverse complementing...");
+    seqs.iter().map(|s| common::reverse_complement(s)).collect()
 }
 
 /// Hash each sequence with SHA-256, keeping the first 8 bytes.
 fn hash_seqs(seqs: Vec<String>) -> Vec<u64> {
-    println!("Hashing...");
+    log::debug!("Hashing...");
     let hash_fn = |s: &String| {
         let mut hasher = Sha256::new();
         hasher.update(s.as_bytes());
@@ -76,7 +104,7 @@ fn hash_seqs(seqs: Vec<String>) -> Vec<u64> {
 
 /// Take the elementwise minimum of two hash vectors.
 fn min_hash(hash1: Vec<u64>, hash2: Vec<u64>) -> Vec<u64> {
-    println!("Getting the minimum hash...");
+    log::debug!("Getting the minimum hash...");
     hash1
         .iter()
         .zip(hash2.iter())
@@ -86,7 +114,7 @@ fn min_hash(hash1: Vec<u64>, hash2: Vec<u64>) -> Vec<u64> {
 
 /// Group identical hashes, mapping each hash to the indices where it occurs.
 fn group_hashes(hashes: Vec<u64>) -> HashMap<u64, Vec<usize>> {
-    println!("Grouping unique hashes into a dictionary...");
+    log::debug!("Grouping unique hashes into a dictionary...");
     let mut d: HashMap<u64, Vec<usize>> = HashMap::new();
     for (i, num) in hashes.iter().enumerate() {
         d.entry(*num).or_default().push(i);
@@ -97,7 +125,7 @@ fn group_hashes(hashes: Vec<u64>) -> HashMap<u64, Vec<usize>> {
 
 /// Keep only hash groups with exactly `alleles` members.
 fn filter_groups(input: HashMap<u64, Vec<usize>>, alleles: usize) -> HashMap<u64, Vec<usize>> {
-    println!("Filtering hash groups by number of alleles...");
+    log::debug!("Filtering hash groups by number of alleles...");
     input
         .into_iter()
         .filter(|(_, v)| v.len() == alleles)
@@ -110,7 +138,7 @@ fn extract_hetmers(
     seqs: Vec<String>,
     counts: Vec<usize>,
 ) -> (Vec<String>, Vec<String>, Vec<u64>) {
-    println!("Extracting counts and sequences...");
+    log::debug!("Extracting counts and sequences...");
 
     let hetmer_seqs: Vec<String> = hashdict
         .values()
@@ -139,7 +167,7 @@ fn extract_hetmers(
 
 /// Write a vector of strings to a file, one line per element.
 fn write_file(output: &[String], prefix: &str, suffix: &str) {
-    println!("Saving results to {}_{}...", prefix, suffix);
+    log::info!("Saving results to {}_{}...", prefix, suffix);
     let mut file = File::create(format!("{}_{}", prefix, suffix)).expect("Unable to create file");
     writeln!(file, "{}", output.join("\n")).expect("Unable to write to file");
 }
@@ -159,12 +187,14 @@ pub fn kmers_to_hetmers(
 ) {
     // load k-mers
     let kmers = load_kmers(input, minimum);
+    let seqs: Vec<String> = kmers.iter().map(|(seq, _)| seq.clone()).collect();
+    let counts: Vec<usize> = kmers.iter().map(|(_, count)| *count).collect();
 
     // input checks
-    input_checkers::all_checks(&kmers.0);
+    all_checks(&seqs);
 
     // remove central base from each k-mer
-    let borders = extract_border(&kmers.0);
+    let borders = extract_border(&seqs);
 
     // reverse complement borders
     let revborders = rev_comp(&borders);
@@ -183,7 +213,7 @@ pub fn kmers_to_hetmers(
     let filtered_groups = filter_groups(grouped_hashes, alleles);
 
     // extract sequences for each hash group
-    let hetmers = extract_hetmers(filtered_groups, kmers.0, kmers.1);
+    let hetmers = extract_hetmers(filtered_groups, seqs, counts);
 
     // empirical frequencies
     let empirical_frequencies = freq_from_hetmers::counts_to_frequencies(&hetmers.1);

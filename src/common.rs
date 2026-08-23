@@ -75,7 +75,8 @@ pub fn get_canonical_kmers(sequence: &str, k: usize) -> Vec<String> {
     canonical_kmers
 }
 
-fn reverse_complement(dna_sequence: &str) -> String {
+/// Compute the reverse complement of a DNA sequence.
+pub fn reverse_complement(dna_sequence: &str) -> String {
     dna_sequence
         .chars()
         .rev()

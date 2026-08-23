@@ -1,54 +1,53 @@
 use statrs::function::gamma::gamma;
 
-/// Compute empirical minor-allele frequencies from hetmer count pairs.
-pub fn counts_to_frequencies(count_pairs: &[String]) -> Vec<String> {
-    println!("Calculating frequencies...");
-    let frequencies: Vec<_> = count_pairs
+/// Parse comma-joined count pairs into (minor, major) count tuples.
+/// Pairs that do not have exactly two parseable counts become `None`.
+fn parse_count_pairs(count_pairs: &[String]) -> Vec<Option<(f64, f64)>> {
+    count_pairs
         .iter()
-        .filter_map(|s| {
+        .map(|s| {
             let parts: Vec<&str> = s.split(',').collect();
             if parts.len() == 2 {
                 if let (Ok(num1), Ok(num2)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
-                    let min_num = num1.min(num2);
-                    let max_num = num1.max(num2);
-                    let sum = min_num + max_num;
-                    if sum != 0.0 {
-                        return Some(min_num / sum);
-                    }
+                    return Some((num1.min(num2), num1.max(num2)));
                 }
             }
             None
         })
-        .collect();
+        .collect()
+}
 
-    frequencies.into_iter().map(|s| s.to_string()).collect()
+/// Compute empirical minor-allele frequencies from hetmer count pairs.
+pub fn counts_to_frequencies(count_pairs: &[String]) -> Vec<String> {
+    log::info!("Calculating frequencies...");
+    parse_count_pairs(count_pairs)
+        .into_iter()
+        .filter_map(|pair| {
+            let (min_num, max_num) = pair?;
+            let sum = min_num + max_num;
+            if sum != 0.0 {
+                Some((min_num / sum).to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Tag hetmers with really high total coverage (potentially due to paralogous sequences).
 pub fn high_cov_hetmers(count_pairs: &[String], sigma: f64, n: i32, cov: f64) -> Vec<String> {
-    println!("Checking for questionable hetmers...");
-    let potential_filter: Vec<_> = count_pairs
-        .iter()
-        .filter_map(|s| {
-            let parts: Vec<&str> = s.split(',').collect();
-            if parts.len() == 2 {
-                if let (Ok(num1), Ok(num2)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
-                    let sum = num1 + num2;
-                    let stderr = ((n as f64) * cov).sqrt();
-                    if sum > sigma * stderr {
-                        return Some(1);
-                    } else {
-                        return Some(0);
-                    }
-                }
-            }
-            None
-        })
-        .collect();
-
-    potential_filter
+    log::info!("Checking for questionable hetmers...");
+    let stderr = ((n as f64) * cov).sqrt();
+    parse_count_pairs(count_pairs)
         .into_iter()
-        .map(|s| s.to_string())
+        .filter_map(|pair| {
+            let (num1, num2) = pair?;
+            if num1 + num2 > sigma * stderr {
+                Some("1".to_string())
+            } else {
+                Some("0".to_string())
+            }
+        })
         .collect()
 }
 
@@ -117,19 +116,15 @@ pub fn counts_to_bayes_state(
     alpha: f64,
     beta: f64,
 ) -> Vec<usize> {
-    println!("Calculating posterior...");
-    count_pairs
-        .iter()
-        .map(|s| {
-            let parts: Vec<&str> = s.split(',').collect();
-            if parts.len() == 2 {
-                if let (Ok(num1), Ok(num2)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
-                    let x = num1.min(num2);
-                    let z = num1 + num2;
-                    return posterior_min_kmer_count(x, z, n, cov, c, alpha, beta);
-                }
+    log::info!("Calculating posterior...");
+    parse_count_pairs(count_pairs)
+        .into_iter()
+        .map(|pair| match pair {
+            Some((x, max_num)) => {
+                let z = x + max_num;
+                posterior_min_kmer_count(x, z, n, cov, c, alpha, beta)
             }
-            0
+            None => 0,
         })
         .collect()
 }
