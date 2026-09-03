@@ -30,6 +30,53 @@ fn read_index_kmers(index: &str) -> Result<Vec<Vec<Vec<String>>>, io::Error> {
     Ok(data)
 }
 
+/// Pack a canonical ATGC k-mer into an integer (2 bits per base) for cheap
+/// hashing. Returns `None` if the k-mer is empty (the empty-allele
+/// pseudo-entry ""), contains non-ATGC characters, or is longer than 31 bases.
+fn pack_kmer(kmer: &str) -> Option<u64> {
+    if kmer.is_empty() || kmer.len() > 31 {
+        return None;
+    }
+    let mut packed: u64 = 0;
+    for c in kmer.bytes() {
+        let two_bit = match c {
+            b'A' => 0,
+            b'C' => 1,
+            b'G' => 2,
+            b'T' => 3,
+            _ => return None,
+        };
+        packed = (packed << 2) | two_bit;
+    }
+    Some(packed)
+}
+
+/// Key for counting k-mers in a hash map. Packed `u64` for k <= 31 (the normal
+/// case); heap `String` fallback for longer k-mers so behavior is unchanged
+/// for any k.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum KmerKey {
+    Packed(u64),
+    Str(String),
+}
+
+impl KmerKey {
+    fn from_kmer(kmer: &str) -> KmerKey {
+        match pack_kmer(kmer) {
+            Some(packed) => KmerKey::Packed(packed),
+            None => KmerKey::Str(kmer.to_string()),
+        }
+    }
+}
+
+/// Parse the k-mer field (column 7) of one index line into a flat list of
+/// k-mers, one entry per k-mer occurrence (including the empty-allele
+/// pseudo-entry "", matching the original counting behavior).
+fn kmers_from_line(line: &str) -> Vec<&str> {
+    let fields: Vec<&str> = line.split(',').collect();
+    fields[7].split('|').flat_map(|s| s.split(';')).collect()
+}
+
 /// Build a hashset of all k-mers in non-variable reference regions.
 pub fn reference_hashset(index: &str, fasta_path: &str, vcf_path: &str) -> HashSet<String> {
     log::info!("Reading k-mer length from index...");
@@ -268,6 +315,7 @@ pub fn remove_ref_kmers(
         let line = line_result?;
         let fields: Vec<&str> = line.split(',').collect();
         let dedup_kmers = &data[i];
+
         let num_kmers_per_allele = dedup_kmers
             .iter()
             .map(|inner_vec| {
@@ -300,51 +348,61 @@ pub fn remove_ref_kmers(
 }
 
 /// Remove k-mers shared across variants from an index and write a new index.
+///
+/// Streams the index file twice instead of loading it into memory: the first
+/// pass counts k-mer occurrences in a `HashMap<KmerKey, u32>`, the second pass
+/// re-reads each line, drops duplicated k-mers, and rewrites the line.
+/// Memory is proportional to the number of unique k-mers, not index size.
 pub fn find_dup_kmers_across_var(index: &str, output: &str) -> Result<(), io::Error> {
-    log::info!("Reading index...");
-    let mut data = read_index_kmers(index)?;
-
     log::info!("First pass: counting allele-specific k-mers...");
-    let mut counts: HashMap<String, usize> = HashMap::new();
-
-    for inner_vec in &data {
-        for inner_inner_vec in inner_vec {
-            for s in inner_inner_vec {
-                *counts.entry(s.to_string()).or_insert(0) += 1;
+    let mut counts: HashMap<KmerKey, u32> = HashMap::new();
+    {
+        let file = File::open(index)?;
+        let reader = BufReader::new(file);
+        for line_result in reader.lines() {
+            let line = line_result?;
+            for kmer in kmers_from_line(&line) {
+                *counts.entry(KmerKey::from_kmer(kmer)).or_insert(0) += 1;
             }
         }
     }
 
-    let dup_kmers: Vec<String> = counts
-        .into_iter()
-        .filter(|(_key, value)| *value > 1)
-        .map(|(key, _value)| key)
-        .collect();
+    log::info!("Removing k-mers found only once from the count table...");
+    counts.retain(|_, count| *count > 1);
 
-    let dup_kmers_hashset: HashSet<String> = dup_kmers.into_iter().collect();
-
-    log::info!("Second pass: removing k-mers found more than once...");
-    for inner_vec in &mut data {
-        for inner_inner_vec in inner_vec {
-            inner_inner_vec.retain(|s| !dup_kmers_hashset.contains(s));
-        }
-    }
-
-    log::info!("Writing new index...");
+    log::info!("Second pass: removing k-mers found more than once and writing new index...");
     let mut buffered_file = BufWriter::new(File::create(output)?);
-
     let file = File::open(index)?;
     let reader = BufReader::new(file);
 
-    for (i, line_result) in reader.lines().enumerate() {
+    for line_result in reader.lines() {
         let line = line_result?;
         let fields: Vec<&str> = line.split(',').collect();
 
-        let dedup_kmers = &data[i];
+        let kmers_by_allele: Vec<Vec<&str>> = fields[7]
+            .split('|')
+            .map(|s| s.split(';').collect())
+            .collect();
+        let dedup_kmers: Vec<Vec<&str>> = kmers_by_allele
+            .iter()
+            .map(|inner_vec| {
+                inner_vec
+                    .iter()
+                    .filter(|s| !counts.contains_key(&KmerKey::from_kmer(s)))
+                    .cloned()
+                    .collect()
+            })
+            .collect();
 
         let num_kmers_per_allele = dedup_kmers
             .iter()
-            .map(|inner_vec| inner_vec.len().to_string())
+            .map(|inner_vec| {
+                if *inner_vec == vec![""] {
+                    "0".to_string()
+                } else {
+                    inner_vec.len().to_string()
+                }
+            })
             .collect::<Vec<String>>()
             .join("|");
 
@@ -369,4 +427,85 @@ pub fn find_dup_kmers_across_var(index: &str, output: &str) -> Result<(), io::Er
 
     log::info!("Writing successful! :D");
     Ok(())
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn test_pack_kmer() {
+        // "AAAC" packs to 0b000001 = 1
+        assert_eq!(pack_kmer("AAAC"), Some(1));
+        // Full 31-mer is the packing limit: 0b0011011010... (2 bits per base)
+        let packed_31 = "ACGTACGTACGTACGTACGTACGTACGTACC"
+            .bytes()
+            .fold(0u64, |acc, c| {
+                (acc << 2)
+                    | match c {
+                        b'A' => 0,
+                        b'C' => 1,
+                        b'G' => 2,
+                        _ => 3,
+                    }
+            });
+        assert_eq!(
+            pack_kmer("ACGTACGTACGTACGTACGTACGTACGTACC"),
+            Some(packed_31)
+        );
+        // Empty allele pseudo-entry and non-ATGC fall back to None
+        assert_eq!(pack_kmer(""), None);
+        assert_eq!(pack_kmer("ATGCN"), None);
+        // Longer than 31 falls back to None
+        assert_eq!(pack_kmer("ACGTACGTACGTACGTACGTACGTACGTACGT"), None);
+    }
+
+    #[test]
+    fn test_kmer_key_roundtrip() {
+        assert_eq!(KmerKey::from_kmer("AAAC"), KmerKey::Packed(1));
+        assert_eq!(KmerKey::from_kmer(""), KmerKey::Str(String::new()));
+        assert_eq!(
+            KmerKey::from_kmer("ACGTACGTACGTACGTACGTACGTACGTACGT"),
+            KmerKey::Str("ACGTACGTACGTACGTACGTACGTACGTACGT".to_string())
+        );
+    }
+
+    #[test]
+    fn test_kmers_from_line() {
+        let line = "0,1,100,SEQ,REF|ALT,SEQ|ALT,2|1,AAA;CCC|GGG";
+        assert_eq!(kmers_from_line(line), vec!["AAA", "CCC", "GGG"]);
+        // Empty allele pseudo-entry is preserved for counting
+        let line_empty = "0,1,100,SEQ,REF|ALT,SEQ|ALT,0|0,|";
+        assert_eq!(kmers_from_line(line_empty), vec!["", ""]);
+    }
+
+    #[test]
+    fn test_find_dup_kmers_across_var_end_to_end() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let index_path = dir.path().join("index.txt");
+        let output_path = dir.path().join("dedup.txt");
+        // Variant 1: AAA appears twice within the line (duplicate) -> removed
+        // everywhere; CCC and TTT appear once and stay.
+        // Variant 2 has an empty allele (pseudo-entry "" in both fields).
+        std::fs::write(
+            &index_path,
+            concat!(
+                "0,1,100,AAAA,REF|ALT,AAAA|ACAA,2|2,AAA;CCC|AAA;TTT\n",
+                "1,1,200,CCCC,REF|ALT,CCCC|CCGG,0|1,|GGG\n",
+            ),
+        )
+        .expect("write index");
+        find_dup_kmers_across_var(
+            index_path.to_str().expect("path"),
+            output_path.to_str().expect("path"),
+        )
+        .expect("dedup");
+        let result = std::fs::read_to_string(&output_path).expect("read output");
+        let expected = concat!(
+            "0,1,100,AAAA,REF|ALT,AAAA|ACAA,1|1,CCC|TTT\n",
+            // GGG appears once -> stays; empty allele still yields 0.
+            "1,1,200,CCCC,REF|ALT,CCCC|CCGG,0|1,|GGG\n",
+        );
+        assert_eq!(result, expected);
+    }
 }
