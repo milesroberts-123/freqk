@@ -85,6 +85,22 @@ pub fn count_target_kmers_in_reads(
     merged_counts
 }
 
+/// Count indexed k-mers across several reads files, merging counts.
+pub fn count_target_kmers_in_reads_files(
+    index: &str,
+    reads_files: &[String],
+    k: i64,
+    nthreads: usize,
+) -> HashMap<String, usize> {
+    let mut merged_counts: HashMap<String, usize> = HashMap::new();
+    for reads in reads_files {
+        log::info!("Counting k-mers in reads file: {}", reads);
+        let file_counts = count_target_kmers_in_reads(index, reads, k, nthreads);
+        merged_counts = merge_hashmaps(vec![merged_counts, file_counts]);
+    }
+    merged_counts
+}
+
 /// Write k-mer counts to a file.
 pub fn write_kmers(kmer_counts: HashMap<String, usize>, output: &str) -> io::Result<()> {
     let mut file = File::create(output)?;
@@ -141,7 +157,7 @@ pub fn combine_counts_by_allele(
 /// Count indexed k-mers in reads and write per-allele and per-k-mer counts.
 pub fn count_workflow(
     index: &str,
-    reads: &str,
+    reads_files: &[String],
     nthreads: usize,
     freq_output: &str,
     count_output: &str,
@@ -150,9 +166,9 @@ pub fn count_workflow(
     let k = common::k_from_index(index);
     log::info!("k is: {:?}", k);
     log::debug!("Counting indexed k-mers in reads...");
-    let kmer_counts = count_target_kmers_in_reads(
+    let kmer_counts = count_target_kmers_in_reads_files(
         index,
-        reads,
+        reads_files,
         k.expect("Cannot parse kmer length from index."),
         nthreads,
     );

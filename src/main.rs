@@ -53,9 +53,10 @@ enum Commands {
             long,
             help = "comma-separated list of reads in fastq format (can be gz or not)",
             value_delimiter = ',',
+            num_args = 1..,
             value_name = "FILE"
         )]
-        reads: String,
+        reads: Vec<String>,
         #[arg(
             short,
             long,

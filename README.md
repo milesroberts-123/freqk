@@ -34,14 +34,14 @@ Grab rust binary from release page
 
 * Index of vcf file `tabix myfile.vcf.gz`
 
-3. Pooled DNA sequencing reads in a single fastq file. Read pairing information does not matter and reads can be combined like so:
+3. Pooled DNA sequencing reads. Read pairing information does not matter and reads can be passed as a comma-separated list of fastq files (gzipped or not), like so:
 
 ```
 # for gzip compressed fastq files
-zcat r1.fastq.gz r2.fastq.gz u.fastq.gz > all.fastq
+-r r1.fastq.gz,r2.fastq.gz,u.fastq.gz
 
 # for uncompressed fastq files
-cat r1.fastq r2.fastq u.fastq > all.fastq
+-r r1.fastq,r2.fastq,u.fastq
 ```
 
 ## Outputs
@@ -73,7 +73,7 @@ cd freqk
 freqk index -f tests/test.fasta --vcf tests/test.vcf.gz -o index.txt -k 31
 freqk var-dedup --index index.txt --output var_index.txt
 freqk ref-dedup -i var_index.txt -o ref_index.txt -f tests/test.fasta --vcf tests/test.vcf.gz
-freqk count -i ref_index.txt -r tests/test.fastq.gz -n 4 -f counts_by_allele.txt -c counts_by_kmer.txt
+freqk count -i ref_index.txt -r tests/trimmed_paired_R1_1_0.fastq.gz,tests/trimmed_paired_R2_1_0.fastq.gz,tests/trimmed_unpaired_R1_1_0.fastq.gz,tests/trimmed_unpaired_R2_1_0.fastq.gz -n 4 -f counts_by_allele.txt -c counts_by_kmer.txt
 freqk call -i ref_index.txt -c counts_by_allele.txt -o calls.txt
 ```
 
@@ -101,7 +101,7 @@ The slower deduplication step is `ref-dedup`. This step removes any allele-speci
 
 For example, counting indexed k-mers with four threads (`-n 4`) looks like this:
 
-`freqk count -i ref_index.txt -r tests/test.fastq.gz -n 4 -f counts_by_allele.txt -c counts_by_kmer.txt`
+`freqk count -i ref_index.txt -r tests/trimmed_paired_R1_1_0.fastq.gz,tests/trimmed_paired_R2_1_0.fastq.gz,tests/trimmed_unpaired_R1_1_0.fastq.gz,tests/trimmed_unpaired_R2_1_0.fastq.gz -n 4 -f counts_by_allele.txt -c counts_by_kmer.txt`
 
 4. Normalize allele-specific k-mer counts into allele frequencies
 
