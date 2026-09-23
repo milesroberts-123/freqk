@@ -1,5 +1,5 @@
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 
@@ -7,32 +7,57 @@ use crate::common;
 
 mod freq_from_hetmers;
 
-/// Read a k-mer count table (two tab-separated columns) into (sequence, count) pairs.
-fn load_kmers(input: &str, minimum: usize) -> Vec<(String, usize)> {
+/// Read a k-mer count table (two tab-separated columns) into (sequence, count)
+/// pairs. Unreadable files, unparseable counts, and empty k-mer strings are
+/// hard errors; lines with the wrong column count are skipped with a warning.
+fn load_kmers(input: &str, minimum: usize) -> Result<Vec<(String, usize)>, std::io::Error> {
     log::info!("Loading k-mer count file {}...", input);
-    let file = File::open(input).expect("Unable to open file");
+    let file = File::open(input)?;
     let reader = BufReader::new(file);
     let mut kmers = Vec::new();
 
-    for line in reader.lines() {
-        let line = line.expect("Unable to read line");
+    for (line_number, line) in reader.lines().enumerate() {
+        let line = line?;
         let parts: Vec<&str> = line.split('\t').collect();
 
         if parts.len() != 2 {
-            log::warn!("Skipping line that does not have two tab-separated columns:");
+            log::warn!(
+                "Skipping line {} that does not have two tab-separated columns:",
+                line_number + 1
+            );
             log::warn!("{}", line);
             continue;
         }
 
-        let seq = parts[0].to_string();
-        let count: usize = parts[1].parse().expect("Invalid count value");
+        let seq = parts[0];
+        if seq.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "Empty k-mer on line {} of {} (hetmers cannot process empty k-mers)",
+                    line_number + 1,
+                    input
+                ),
+            ));
+        }
+        let count: usize = parts[1].parse().map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "Invalid count value on line {} of {}: {}",
+                    line_number + 1,
+                    input,
+                    e
+                ),
+            )
+        })?;
 
         if count >= minimum {
-            kmers.push((seq, count));
+            kmers.push((seq.to_string(), count));
         }
     }
 
-    kmers
+    Ok(kmers)
 }
 
 /// Check that k-mers are lexicographically sorted (first 1000 elements).
@@ -113,9 +138,11 @@ fn min_hash(hash1: Vec<u64>, hash2: Vec<u64>) -> Vec<u64> {
 }
 
 /// Group identical hashes, mapping each hash to the indices where it occurs.
-fn group_hashes(hashes: Vec<u64>) -> HashMap<u64, Vec<usize>> {
+/// A BTreeMap keeps the output files in ascending-hash order, deterministic
+/// across runs.
+fn group_hashes(hashes: Vec<u64>) -> BTreeMap<u64, Vec<usize>> {
     log::debug!("Grouping unique hashes into a dictionary...");
-    let mut d: HashMap<u64, Vec<usize>> = HashMap::new();
+    let mut d: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
     for (i, num) in hashes.iter().enumerate() {
         d.entry(*num).or_default().push(i);
     }
@@ -124,7 +151,7 @@ fn group_hashes(hashes: Vec<u64>) -> HashMap<u64, Vec<usize>> {
 }
 
 /// Keep only hash groups with exactly `alleles` members.
-fn filter_groups(input: HashMap<u64, Vec<usize>>, alleles: usize) -> HashMap<u64, Vec<usize>> {
+fn filter_groups(input: BTreeMap<u64, Vec<usize>>, alleles: usize) -> BTreeMap<u64, Vec<usize>> {
     log::debug!("Filtering hash groups by number of alleles...");
     input
         .into_iter()
@@ -134,7 +161,7 @@ fn filter_groups(input: HashMap<u64, Vec<usize>>, alleles: usize) -> HashMap<u64
 
 /// Extract hetmer sequences, counts, and hashes from hash groups.
 fn extract_hetmers(
-    hashdict: HashMap<u64, Vec<usize>>,
+    hashdict: BTreeMap<u64, Vec<usize>>,
     seqs: Vec<String>,
     counts: Vec<usize>,
 ) -> (Vec<String>, Vec<String>, Vec<u64>) {
@@ -186,7 +213,10 @@ pub fn kmers_to_hetmers(
     sigma: f64,
 ) {
     // load k-mers
-    let kmers = load_kmers(input, minimum);
+    let kmers = load_kmers(input, minimum).unwrap_or_else(|e| {
+        log::error!("Loading hetmers input failed: {}", e);
+        std::process::exit(1);
+    });
     let seqs: Vec<String> = kmers.iter().map(|(seq, _)| seq.clone()).collect();
     let counts: Vec<usize> = kmers.iter().map(|(_, count)| *count).collect();
 
@@ -311,7 +341,7 @@ mod unit_tests {
 
     #[test]
     fn seqs_from_hashmap() {
-        let mut input = HashMap::new();
+        let mut input = BTreeMap::new();
         input.insert(9875, vec![0, 4]);
         input.insert(1111, vec![1, 2]);
         input.insert(2222, vec![3, 5]);
@@ -342,7 +372,7 @@ mod unit_tests {
 
     #[test]
     fn counts_from_hashmap() {
-        let mut input = HashMap::new();
+        let mut input = BTreeMap::new();
         input.insert(9875, vec![0, 4]);
         input.insert(1111, vec![1, 2]);
         input.insert(2222, vec![3, 5]);
@@ -369,7 +399,7 @@ mod unit_tests {
 
     #[test]
     fn hashes_from_hashmap() {
-        let mut input = HashMap::new();
+        let mut input = BTreeMap::new();
         input.insert(9875, vec![0, 4]);
         input.insert(1111, vec![1, 2]);
         input.insert(2222, vec![3, 5]);
@@ -394,7 +424,7 @@ mod unit_tests {
 
     #[test]
     fn two_alleles() {
-        let mut input = HashMap::new();
+        let mut input = BTreeMap::new();
         input.insert(1, vec![0, 1]);
         input.insert(2, vec![2, 3, 4]); // should be filtered out
         input.insert(3, vec![2, 3, 4, 5]); // should be filtered out
@@ -404,7 +434,7 @@ mod unit_tests {
         let alleles = 2;
         let result = filter_groups(input, alleles);
 
-        let mut expected = HashMap::new();
+        let mut expected = BTreeMap::new();
         expected.insert(1, vec![0, 1]);
         expected.insert(5, vec![5, 6]);
 
@@ -413,7 +443,7 @@ mod unit_tests {
 
     #[test]
     fn three_alleles() {
-        let mut input = HashMap::new();
+        let mut input = BTreeMap::new();
         input.insert(1, vec![0, 1]);
         input.insert(2, vec![2, 3, 4]);
         input.insert(3, vec![2, 3, 4, 5]);
@@ -423,7 +453,7 @@ mod unit_tests {
         let alleles = 3;
         let result = filter_groups(input, alleles);
 
-        let mut expected = HashMap::new();
+        let mut expected = BTreeMap::new();
         expected.insert(2, vec![2, 3, 4]);
 
         assert_eq!(result, expected);
@@ -431,7 +461,7 @@ mod unit_tests {
 
     #[test]
     fn four_alleles() {
-        let mut input = HashMap::new();
+        let mut input = BTreeMap::new();
         input.insert(1, vec![0, 1]);
         input.insert(2, vec![2, 3, 4]);
         input.insert(3, vec![2, 3, 4, 5]);
@@ -441,7 +471,7 @@ mod unit_tests {
         let alleles = 4;
         let result = filter_groups(input, alleles);
 
-        let mut expected = HashMap::new();
+        let mut expected = BTreeMap::new();
         expected.insert(3, vec![2, 3, 4, 5]);
 
         assert_eq!(result, expected);
@@ -449,12 +479,12 @@ mod unit_tests {
 
     #[test]
     fn filter_groups_no_matches() {
-        let mut input = HashMap::new();
+        let mut input = BTreeMap::new();
         input.insert(1, vec![0]);
         input.insert(2, vec![1, 2, 3]);
 
         let result = filter_groups(input, 2);
-        let expected: HashMap<u64, Vec<usize>> = HashMap::new();
+        let expected: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
 
         assert_eq!(result, expected);
     }

@@ -276,6 +276,9 @@ fn main() {
             ..
         } => {
             log::info!("Finding hetmers in k-mer counts");
+            for input in inputs.iter() {
+                common::ensure_readable(input);
+            }
             let params = inputs
                 .iter()
                 .zip(outputs.iter())
