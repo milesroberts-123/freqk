@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{self, prelude::*, BufReader};
 
 /// Write a 2D array of allele frequencies to a file, one `|`-joined line per site.
-fn write_allele_freqs(counts: Vec<Vec<f32>>, output_file: &str) {
+fn write_allele_freqs(counts: Vec<Vec<f32>>, output_file: &str) -> io::Result<()> {
     let mut output_str = Vec::new();
     for one_site in &counts {
         let one_site_str = one_site
@@ -13,7 +13,7 @@ fn write_allele_freqs(counts: Vec<Vec<f32>>, output_file: &str) {
             .join("|");
         output_str.push(one_site_str);
     }
-    let _ = common::write_strings(output_str, output_file);
+    common::write_strings(output_str, output_file)
 }
 
 /// Convert a 2D array of strings to u32, dropping unparseable entries.
@@ -104,8 +104,7 @@ pub fn call_from_counts(index: &str, counts: &str, output: &str) -> Result<(), i
     log::info!("Converting normalized counts to allele frequencies...");
     let allele_freq = normalized_counts_to_allele_freq(counts_per_kmer?);
     log::info!("Writing allele frequency estimates to {}", output);
-    write_allele_freqs(allele_freq, output);
-    Ok(())
+    write_allele_freqs(allele_freq, output)
 }
 
 #[cfg(test)]
@@ -122,5 +121,25 @@ mod unit_tests {
             &test_num_uniq_kmers_per_allele,
         );
         assert_eq!(result.unwrap(), expected);
+    }
+
+    #[test]
+    fn test_call_from_counts_missing_counts_file() {
+        let result = call_from_counts(
+            "does-not-matter.txt",
+            "/nonexistent/counts.txt",
+            "/tmp/opencode/never.txt",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_call_from_counts_missing_index() {
+        let result = call_from_counts(
+            "/nonexistent/index.txt",
+            "does-not-matter.txt",
+            "/tmp/opencode/never.txt",
+        );
+        assert!(result.is_err());
     }
 }

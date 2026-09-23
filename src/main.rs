@@ -168,6 +168,9 @@ fn main() {
             ..
         } => {
             log::info!("fasta: {}, vcf: {}, k: {}", fasta, vcf, kmer);
+            common::ensure_readable(fasta);
+            common::ensure_readable(&format!("{}.fai", fasta));
+            common::ensure_readable(vcf);
             index::index_workflow(vcf, fasta, output, *kmer);
         }
         Commands::Count {
@@ -180,6 +183,10 @@ fn main() {
             ..
         } => {
             log::info!("Counting k-mers: INDEX: {}, READS: {:?}, NTHREADS: {}, PRINT_FREQUENCY: {}, FREQ OUTPUT: {}, COUNT OUTPUT: {}", index, reads, nthreads, print_frequency, freq_output, count_output);
+            common::ensure_readable(index);
+            for reads_file in reads {
+                common::ensure_readable(reads_file);
+            }
             count::count_workflow(
                 index,
                 reads,
@@ -201,7 +208,11 @@ fn main() {
                 output,
                 min_alleles
             );
-            let _ = dedup::find_dup_kmers_across_var(index, output, *min_alleles);
+            common::ensure_readable(index);
+            if let Err(e) = dedup::find_dup_kmers_across_var(index, output, *min_alleles) {
+                log::error!("var-dedup failed: {}", e);
+                std::process::exit(1);
+            }
         }
         Commands::RefDedup {
             index,
@@ -219,8 +230,15 @@ fn main() {
                 vcf,
                 min_alleles
             );
+            common::ensure_readable(index);
+            common::ensure_readable(fasta);
+            common::ensure_readable(&format!("{}.fai", fasta));
+            common::ensure_readable(vcf);
             let ref_hash = dedup::reference_hashset(index, fasta, vcf);
-            let _ = dedup::remove_ref_kmers(index, output, ref_hash, *min_alleles);
+            if let Err(e) = dedup::remove_ref_kmers(index, output, ref_hash, *min_alleles) {
+                log::error!("ref-dedup failed: {}", e);
+                std::process::exit(1);
+            }
         }
         Commands::Call {
             index,
@@ -234,7 +252,12 @@ fn main() {
                 counts,
                 output
             );
-            let _ = call::call_from_counts(index, counts, output);
+            common::ensure_readable(index);
+            common::ensure_readable(counts);
+            if let Err(e) = call::call_from_counts(index, counts, output) {
+                log::error!("call failed: {}", e);
+                std::process::exit(1);
+            }
         }
         Commands::Hetmers {
             inputs,

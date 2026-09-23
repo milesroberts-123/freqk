@@ -265,6 +265,15 @@ pub fn write_strings(strings: Vec<String>, output: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Verify that a file can be opened for reading, exiting with a clear error
+/// message if it cannot (missing file, bad permissions, ...).
+pub fn ensure_readable(path: &str) {
+    if let Err(e) = File::open(path) {
+        log::error!("Cannot read file '{}': {}", path, e);
+        std::process::exit(1);
+    }
+}
+
 #[cfg(test)]
 mod unit_tests {
     use super::*;
