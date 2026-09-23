@@ -31,43 +31,12 @@ fn read_index_kmers(index: &str) -> Result<Vec<Vec<Vec<String>>>, io::Error> {
 }
 
 /// Pack a canonical ATGC k-mer into an integer (2 bits per base) for cheap
-/// hashing. Returns `None` if the k-mer is empty (the empty-allele
-/// pseudo-entry ""), contains non-ATGC characters, or is longer than 31 bases.
-fn pack_kmer(kmer: &str) -> Option<u64> {
-    if kmer.is_empty() || kmer.len() > 31 {
-        return None;
-    }
-    let mut packed: u64 = 0;
-    for c in kmer.bytes() {
-        let two_bit = match c {
-            b'A' => 0,
-            b'C' => 1,
-            b'G' => 2,
-            b'T' => 3,
-            _ => return None,
-        };
-        packed = (packed << 2) | two_bit;
-    }
-    Some(packed)
-}
-
-/// Key for counting k-mers in a hash map. Packed `u64` for k <= 31 (the normal
-/// case); heap `String` fallback for longer k-mers so behavior is unchanged
-/// for any k.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum KmerKey {
-    Packed(u64),
-    Str(String),
-}
-
-impl KmerKey {
-    fn from_kmer(kmer: &str) -> KmerKey {
-        match pack_kmer(kmer) {
-            Some(packed) => KmerKey::Packed(packed),
-            None => KmerKey::Str(kmer.to_string()),
-        }
-    }
-}
+/// hashing, and key for counting k-mers in a hash map: packed `u64` for
+/// k <= 31 (the normal case); heap `String` fallback for longer k-mers so
+/// behavior is unchanged for any k. Both live in `common`, shared with `count`.
+#[cfg(test)]
+use crate::common::pack_kmer;
+use crate::common::KmerKey;
 
 /// Parse the k-mer field (column 7) of one index line into a flat list of
 /// k-mers, one entry per k-mer occurrence (including the empty-allele

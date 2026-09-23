@@ -28,6 +28,11 @@
 
 - [ ] add typical counting speed
 
+- [x] reduce `count` memory: k-mers stored as packed u64 keys (k <= 31) instead of
+  Strings; hashset shared across threads with Arc; counts map keyed by packed k-mer.
+  Measured on a 6.2M k-mer index: 996 MB -> 501 MB with 1 thread, 2.49 GB -> 505 MB
+  with 4 threads; counts byte-identical before/after.
+
 - [x] add unit tests
 
 - [ ] add methods to structs
