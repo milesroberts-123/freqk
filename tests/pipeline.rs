@@ -1,14 +1,14 @@
 //! End-to-end pipeline test: runs the README quick-start commands against the
 //! tracked test fixtures and asserts the canonical outputs, locking the
-//! `calls.txt` md5 = ea5a558fc94766653a81d604755f04e4 contract.
+//! `calls.txt` md5 = 27c8de92b97963229c7cc8e4c3569ad6 contract.
 //!
 //! Skipped automatically when the gzip fixtures are absent (e.g. a fresh clone
 //! without the force-added fastq files).
 
 use std::process::Command;
 
-const CALLS_MD5: &str = "ea5a558fc94766653a81d604755f04e4";
-const COUNTS_BY_KMER_MD5: &str = "241b92bec1473f440842b9f129d5451e";
+const CALLS_MD5: &str = "27c8de92b97963229c7cc8e4c3569ad6";
+const COUNTS_BY_KMER_MD5: &str = "0b4f313da484d62dd422e962ff2d7463";
 
 fn fixture(path: &str) -> String {
     format!("{}/tests/{}", env!("CARGO_MANIFEST_DIR"), path)

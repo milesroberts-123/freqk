@@ -1,7 +1,6 @@
 use rust_htslib::bcf::Read;
 use rust_htslib::bcf::Reader;
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, prelude::*, BufReader};
 use std::io::{BufWriter, Write};
@@ -37,6 +36,46 @@ fn kmers_from_line(line: &str) -> Vec<&str> {
 }
 
 /// Build a hashset of all k-mers in non-variable reference regions.
+/// Fetch a reference region and insert its canonical k-mers of length `k`
+/// into `ref_kmers_hashset`, returning the scanned interval [start, stop)
+/// (0-based, stop exclusive) for coverage tracking.
+fn scan_region(
+    faidx: &rust_htslib::faidx::Reader,
+    chrom: &str,
+    start: i64,
+    stop: i64,
+    k: i64,
+    ref_kmers_hashset: &mut HashSet<String>,
+) {
+    if start >= stop {
+        log::debug!("Skipping empty region {}:{}-{}", chrom, start, stop);
+        return;
+    }
+    log::debug!("Scanning reference region {}:{}-{}", chrom, start, stop);
+    let seq_string = match common::fetch_fasta(
+        faidx,
+        chrom,
+        start.try_into().expect("Negative region start"),
+        stop.try_into().expect("Negative region stop"),
+    ) {
+        Ok(seq) => seq,
+        Err(e) => {
+            log::error!("Fetching {}:{}-{} failed: {}", chrom, start, stop, e);
+            std::process::exit(1);
+        }
+    };
+    let ref_kmers: Vec<String> = common::get_canonical_kmers(&seq_string, k as usize);
+    for ref_kmer in ref_kmers {
+        ref_kmers_hashset.insert(ref_kmer);
+    }
+}
+
+/// Build a hashset of all k-mers in non-variable reference regions.
+///
+/// The reference is scanned between variants (everything except the k flanks
+/// around each variant), the tail after the last variant of each chromosome,
+/// and chromosomes that have no variants at all, so that ref-dedup removes
+/// index k-mers that exist anywhere in the reference genome.
 pub fn reference_hashset(index: &str, fasta_path: &str, vcf_path: &str) -> HashSet<String> {
     log::info!("Reading k-mer length from index...");
     let k = common::k_from_index(index).expect("Error reading k-mer length from index.");
@@ -48,19 +87,30 @@ pub fn reference_hashset(index: &str, fasta_path: &str, vcf_path: &str) -> HashS
     let chrom_lengths = common::read_fai(fasta_path);
     log::info!("Chromosome lengths:");
     log::info!("{:?}", chrom_lengths);
-    let mut start = 1;
+    // Exclusive end (0-based) of the reference region already scanned on each
+    // chromosome; 0 means nothing scanned yet.
+    let mut covered: HashMap<String, i64> = HashMap::new();
     let mut ref_kmers_hashset = HashSet::new();
-    let mut chrom_visited: HashSet<String> = HashSet::new();
-    // Interval left unfetched-read by a `fetch`-only branch, to be read by the
-    // shared read block below, mirroring the deferred-read flow of the original
-    // bio IndexedReader code (fetch stores the interval, read consumes it).
-    let mut pending: Option<(String, i64, i64)> = None;
     let mut vcf_iterator = vcf_reader.records().peekable();
     while let Some(record_result) = vcf_iterator.next() {
         let record = record_result.expect("Failure reading record");
         let pos = record.pos() - 1;
         let chrom = record_contig(&record);
-        chrom_visited.insert(chrom.into());
+        let chrom_end = match chrom_lengths
+            .as_ref()
+            .expect("Error reading chromosome lengths")
+            .get(chrom)
+        {
+            Some(chrom_end) => *chrom_end,
+            None => {
+                log::error!(
+                    "Chromosome {} from the VCF is not in the FASTA index (.fai); exiting",
+                    chrom
+                );
+                std::process::exit(1);
+            }
+        };
+        let start = covered.get(chrom).cloned().unwrap_or(0);
         let end = pos - k;
         log::debug!("Processing record CHROM: {} POS: {}", chrom, pos);
         log::debug!("Current region start: {}", start);
@@ -78,7 +128,6 @@ pub fn reference_hashset(index: &str, fasta_path: &str, vcf_path: &str) -> HashS
         log::debug!("Reference allele length: {}", ref_allele_len);
         if pos <= 1 {
             log::warn!("Skipping current variant (CHROM: {} POS: {}) because its at the beginning of the chromosome", chrom, pos);
-            start = 1 + k + (ref_allele_len - 1);
             continue;
         }
         if (pos - start) < k {
@@ -88,7 +137,6 @@ pub fn reference_hashset(index: &str, fasta_path: &str, vcf_path: &str) -> HashS
                 pos,
                 start
             );
-            start = pos + k + (ref_allele_len - 1);
             continue;
         }
         if let Some(next_ref) = vcf_iterator.peek() {
@@ -104,154 +152,66 @@ pub fn reference_hashset(index: &str, fasta_path: &str, vcf_path: &str) -> HashS
                     chrom_next,
                     pos_next
                 );
-                if let Some(chrom_end) = chrom_lengths
-                    .as_ref()
-                    .expect("Error reading chromosome lengths")
-                    .get(chrom)
-                {
-                    log::debug!(
-                        "First, extracting sequence before current variant: {} {} - {}",
-                        chrom,
-                        start,
-                        end
-                    );
-                    let seq_string = common::fetch_fasta(
-                        &faidx,
-                        chrom,
-                        start.try_into().unwrap(),
-                        end.try_into().unwrap(),
-                    )
-                    .expect("Could not fetch interval");
-                    log::debug!("Extract canonical k-mers...");
-                    let ref_kmers: Vec<String> =
-                        common::get_canonical_kmers(&seq_string, k as usize);
-                    log::debug!("Putting k-mers into hashset...");
-                    for ref_kmer in ref_kmers {
-                        ref_kmers_hashset.insert(ref_kmer);
-                    }
-                    log::debug!(
-                        "Second, extracting sequence from POS: {} to end of {} at : {:?}",
-                        pos,
-                        chrom,
-                        chrom_end
-                    );
-                    start = pos + k + (ref_allele_len - 1);
-                    if start >= *chrom_end {
-                        log::debug!("Start exceeds chrom end, skipping");
-                        start = 1;
-                        continue;
-                    } else if start < *chrom_end {
-                        log::debug!("start within k bp of chrom end, extracting");
-                        // Fetch now, but the read (k-mer extraction) is deferred to
-                        // the shared read below, matching the original flow.
-                        pending = Some((chrom.to_string(), start, *chrom_end));
-                        start = 1;
-                    }
-                } else {
-                    log::error!("Error getting length of chromosome");
-                    panic!();
-                }
+                // Scan the region before the variant, then the tail from k
+                // bases after the variant to the end of the chromosome.
+                scan_region(&faidx, chrom, start, end, k, &mut ref_kmers_hashset);
+                let tail_start = pos + k + (ref_allele_len - 1);
+                scan_region(
+                    &faidx,
+                    chrom,
+                    tail_start,
+                    chrom_end,
+                    k,
+                    &mut ref_kmers_hashset,
+                );
+                covered.insert(chrom.to_string(), chrom_end);
             } else {
-                log::debug!("Extracting sequence: {}:{}-{}", chrom, start, end);
-                // Fetch only; the read is deferred to the shared read below,
-                // matching the original flow.
-                pending = Some((chrom.to_string(), start, end));
-                start = pos + k + (ref_allele_len - 1);
+                scan_region(&faidx, chrom, start, end, k, &mut ref_kmers_hashset);
+                let new_start = pos + k + (ref_allele_len - 1);
+                covered.insert(chrom.to_string(), new_start);
             }
         } else {
             log::debug!("No next record, so end of VCF reached. Grab remainder of chromosome");
-            if let Some(chrom_end) = chrom_lengths
-                .as_ref()
-                .expect("Error reading chromosome lengths")
-                .get(chrom)
-            {
-                log::debug!(
-                    "First, extracting sequence before current variant: {} {} - {}",
-                    chrom,
-                    start,
-                    end
-                );
-                let seq_string = common::fetch_fasta(
-                    &faidx,
-                    chrom,
-                    start.try_into().unwrap(),
-                    end.try_into().unwrap(),
-                )
-                .expect("Could not fetch interval");
-                log::debug!("Extract canonical k-mers...");
-                let ref_kmers: Vec<String> = common::get_canonical_kmers(&seq_string, k as usize);
-                log::debug!("Putting k-mers into hashset...");
-                for ref_kmer in ref_kmers {
-                    ref_kmers_hashset.insert(ref_kmer);
-                }
-                log::debug!(
-                    "Second, attempting to extract sequence from POS: {} to end of {} at : {:?}",
-                    pos,
-                    chrom,
-                    chrom_end
-                );
-                start = pos + k + (ref_allele_len - 1);
-                if start >= *chrom_end {
-                    log::debug!("POS within k bp of chrom end, breaking loop");
-                    break;
-                } else if start < *chrom_end {
-                    log::debug!("POS not within k bp of chrom end, extracting");
-                    // Fetch now, but the read (k-mer extraction) is deferred to
-                    // the shared read below, matching the original flow.
-                    pending = Some((chrom.to_string(), pos + k, *chrom_end));
-                    start = 1;
-                }
-            } else {
-                log::error!("Error getting length of chromosome.");
-            }
-        }
-        log::debug!("Reading sequence...");
-        let (pending_chrom, pending_start, pending_end) =
-            pending.take().expect("No fetched interval to read");
-        let seq_string = common::fetch_fasta(
-            &faidx,
-            &pending_chrom,
-            pending_start.try_into().unwrap(),
-            pending_end.try_into().unwrap(),
-        )
-        .expect("Could not read interval");
-        log::debug!("Extract canonical k-mers...");
-        let ref_kmers: Vec<String> = common::get_canonical_kmers(&seq_string, k as usize);
-        log::debug!("Putting k-mers into hashset...");
-        for ref_kmer in ref_kmers {
-            ref_kmers_hashset.insert(ref_kmer);
+            scan_region(&faidx, chrom, start, end, k, &mut ref_kmers_hashset);
+            let tail_start = pos + k + (ref_allele_len - 1);
+            scan_region(
+                &faidx,
+                chrom,
+                tail_start,
+                chrom_end,
+                k,
+                &mut ref_kmers_hashset,
+            );
+            covered.insert(chrom.to_string(), chrom_end);
         }
     }
-    let binding = chrom_lengths
-        .as_ref()
-        .expect("Error unpacking chromosome lengths");
-    let unvisted_chroms: Vec<String> = binding
-        .keys()
-        .filter(|x| !chrom_visited.contains(*x))
-        .cloned()
-        .collect();
-    log::warn!("Unvisited chromosomes: {:?}", unvisted_chroms);
-    for unvis_chrom in unvisted_chroms {
-        if let Some(chrom_end) = chrom_lengths
-            .as_ref()
-            .expect("Error reading chromosome lengths")
-            .get(&unvis_chrom)
-        {
-            log::debug!(
-                "Extracting sequence on {:?} from 1 to {}",
-                unvis_chrom,
-                chrom_end
-            );
-            let seq_string = common::fetch_fasta(&faidx, &unvis_chrom, 1, *chrom_end as u64)
-                .expect("Could not fetch interval");
-            log::debug!("Extract canonical k-mers...");
-            let ref_kmers: Vec<String> = common::get_canonical_kmers(&seq_string, k as usize);
-            log::debug!("Putting k-mers into hashset...");
-            for ref_kmer in ref_kmers {
-                ref_kmers_hashset.insert(ref_kmer);
+    // Scan everything not yet covered: chromosome tails after skipped
+    // variants, and chromosomes without any variants at all.
+    let chrom_lengths = chrom_lengths.expect("Error unpacking chromosome lengths");
+    for (chrom, chrom_end) in chrom_lengths.iter() {
+        let scanned_to = covered.get(chrom).cloned().unwrap_or(0);
+        if scanned_to < *chrom_end {
+            if covered.contains_key(chrom) {
+                log::info!(
+                    "Scanning uncovered tail of CHROM: {} from {} to {}",
+                    chrom,
+                    scanned_to,
+                    chrom_end
+                );
+            } else {
+                log::warn!(
+                    "CHROM: {} has no variants in the VCF; scanning it fully",
+                    chrom
+                );
             }
-        } else {
-            log::error!("Error getting length of chromosome.");
+            scan_region(
+                &faidx,
+                chrom,
+                scanned_to,
+                *chrom_end,
+                k,
+                &mut ref_kmers_hashset,
+            );
         }
     }
     ref_kmers_hashset
@@ -285,9 +245,17 @@ pub fn remove_ref_kmers(
     let reader = BufReader::new(file);
     let mut dropped = 0;
     let mut written = 0;
-    for line_result in reader.lines() {
+    for (line_number, line_result) in reader.lines().enumerate() {
         let line = line_result?;
         let fields: Vec<&str> = line.split(',').collect();
+        if fields.len() < 8 {
+            log::warn!(
+                "Skipping malformed index line {} (expected 8 comma-separated fields): {}",
+                line_number + 1,
+                line
+            );
+            continue;
+        }
 
         let kmers_by_allele: Vec<Vec<&str>> = fields[7]
             .split('|')
@@ -384,9 +352,17 @@ pub fn find_dup_kmers_across_var(
     let reader = BufReader::new(file);
     let mut dropped = 0;
 
-    for line_result in reader.lines() {
+    for (line_number, line_result) in reader.lines().enumerate() {
         let line = line_result?;
         let fields: Vec<&str> = line.split(',').collect();
+        if fields.len() < 8 {
+            log::warn!(
+                "Skipping malformed index line {} (expected 8 comma-separated fields): {}",
+                line_number + 1,
+                line
+            );
+            continue;
+        }
 
         let kmers_by_allele: Vec<Vec<&str>> = fields[7]
             .split('|')

@@ -77,7 +77,7 @@ freqk count -i ref_index.txt -r tests/trimmed_paired_R1_1_0.fastq.gz,tests/trimm
 freqk call -i ref_index.txt -c counts_by_allele.txt -o calls.txt
 ```
 
-If the example was successful, the `md5sum` of the final calls.txt file should be `ea5a558fc94766653a81d604755f04e4`
+If the example was successful, the `md5sum` of the final calls.txt file should be `27c8de92b97963229c7cc8e4c3569ad6`
 
 ### step-by-step breakdown
 

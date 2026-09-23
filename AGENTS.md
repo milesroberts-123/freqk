@@ -20,7 +20,7 @@ target/debug/freqk ref-dedup -i var_index.txt -o ref_index.txt -f tests/test.fas
 target/debug/freqk count -i ref_index.txt -r tests/trimmed_paired_R1_1_0.fastq.gz,tests/trimmed_paired_R2_1_0.fastq.gz,tests/trimmed_unpaired_R1_1_0.fastq.gz,tests/trimmed_unpaired_R2_1_0.fastq.gz -n 4 -f counts_by_allele.txt -c counts_by_kmer.txt
 target/debug/freqk call -i ref_index.txt -c counts_by_allele.txt -o calls.txt
 ```
-- Success check: `md5sum calls.txt` == `ea5a558fc94766653a81d604755f04e4`
+- Success check: `md5sum calls.txt` == `27c8de92b97963229c7cc8e4c3569ad6`
 - `count -r` accepts a comma-separated list of fastq files (each parsed and merged);
   do NOT pass one combined file expecting the same list semantics, and beware that
   `clap` `value_delimiter` on a `String` arg silently truncates to the first value
