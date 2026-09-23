@@ -28,6 +28,10 @@ target/debug/freqk call -i ref_index.txt -c counts_by_allele.txt -o calls.txt
 - Intermediate outputs (`*.txt`) are gitignored; don't commit them. The four
   `tests/trimmed_*.fastq.gz` fixtures are deliberately force-added (`git add -f`;
   `.gitignore` ignores `*.fastq.gz`) — keep them tracked.
+- Bump the version in `Cargo.toml` (and refresh `Cargo.lock` via `cargo build`)
+  before every push, as its own `chore: bump version to X.Y.Z` commit:
+  `feat:` → minor, `fix:`/`refactor:`/`perf:` → patch, `docs:`/`chore:` only →
+  no bump. Verify `freqk --version` prints the new number.
 
 ## Input requirements
 - FASTA must be `samtools faidx`-indexed (`.fai` alongside it).
