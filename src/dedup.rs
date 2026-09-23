@@ -277,11 +277,23 @@ pub fn reference_hashset(index: &str, fasta_path: &str, vcf_path: &str) -> HashS
     ref_kmers_hashset
 }
 
+/// Count the alleles of a deduplicated variant that have at least one
+/// non-empty k-mer.
+fn count_alleles_with_kmers<S: AsRef<str>>(dedup_kmers: &[Vec<S>]) -> usize {
+    dedup_kmers
+        .iter()
+        .filter(|inner_vec| inner_vec.iter().any(|s| !s.as_ref().is_empty()))
+        .count()
+}
+
 /// Remove k-mers found in the reference from an index and write a new index.
+/// Rows are dropped entirely when fewer than `min_alleles` alleles retain at
+/// least one k-mer (0 keeps every row).
 pub fn remove_ref_kmers(
     index: &str,
     output: &str,
     ref_hashset: HashSet<String>,
+    min_alleles: usize,
 ) -> Result<(), io::Error> {
     log::info!("Opening index...");
     let mut data = read_index_kmers(index)?;
@@ -295,10 +307,14 @@ pub fn remove_ref_kmers(
     let mut buffered_file = BufWriter::new(File::create(output)?);
     let file = File::open(index)?;
     let reader = BufReader::new(file);
-    for (i, line_result) in reader.lines().enumerate() {
-        let line = line_result?;
+    let mut dropped = 0;
+    for (line, dedup_kmers) in reader.lines().zip(data.iter()) {
+        let line = line_result_string(line)?;
+        if min_alleles > 0 && count_alleles_with_kmers(dedup_kmers) < min_alleles {
+            dropped += 1;
+            continue;
+        }
         let fields: Vec<&str> = line.split(',').collect();
-        let dedup_kmers = &data[i];
 
         let num_kmers_per_allele = dedup_kmers
             .iter()
@@ -328,7 +344,19 @@ pub fn remove_ref_kmers(
         ];
         writeln!(buffered_file, "{}", parts.join(","))?;
     }
+    if min_alleles > 0 && dropped > 0 {
+        log::info!(
+            "Dropped {} index rows with fewer than {} alleles retaining k-mers",
+            dropped,
+            min_alleles
+        );
+    }
     Ok(())
+}
+
+/// Unwrap a `io::Result<String>` line into a `String`, propagating errors.
+fn line_result_string(line_result: Result<String, io::Error>) -> Result<String, io::Error> {
+    line_result
 }
 
 /// Remove k-mers shared across variants from an index and write a new index.
@@ -337,7 +365,13 @@ pub fn remove_ref_kmers(
 /// pass counts k-mer occurrences in a `HashMap<KmerKey, u32>`, the second pass
 /// re-reads each line, drops duplicated k-mers, and rewrites the line.
 /// Memory is proportional to the number of unique k-mers, not index size.
-pub fn find_dup_kmers_across_var(index: &str, output: &str) -> Result<(), io::Error> {
+/// Rows are dropped entirely when fewer than `min_alleles` alleles retain at
+/// least one k-mer (0 keeps every row).
+pub fn find_dup_kmers_across_var(
+    index: &str,
+    output: &str,
+    min_alleles: usize,
+) -> Result<(), io::Error> {
     log::info!("First pass: counting allele-specific k-mers...");
     let mut counts: HashMap<KmerKey, u32> = HashMap::new();
     {
@@ -358,6 +392,7 @@ pub fn find_dup_kmers_across_var(index: &str, output: &str) -> Result<(), io::Er
     let mut buffered_file = BufWriter::new(File::create(output)?);
     let file = File::open(index)?;
     let reader = BufReader::new(file);
+    let mut dropped = 0;
 
     for line_result in reader.lines() {
         let line = line_result?;
@@ -377,6 +412,11 @@ pub fn find_dup_kmers_across_var(index: &str, output: &str) -> Result<(), io::Er
                     .collect()
             })
             .collect();
+
+        if min_alleles > 0 && count_alleles_with_kmers(&dedup_kmers) < min_alleles {
+            dropped += 1;
+            continue;
+        }
 
         let num_kmers_per_allele = dedup_kmers
             .iter()
@@ -409,6 +449,13 @@ pub fn find_dup_kmers_across_var(index: &str, output: &str) -> Result<(), io::Er
         writeln!(buffered_file, "{}", parts.join(","))?;
     }
 
+    if min_alleles > 0 && dropped > 0 {
+        log::info!(
+            "Dropped {} index rows with fewer than {} alleles retaining k-mers",
+            dropped,
+            min_alleles
+        );
+    }
     log::info!("Writing successful! :D");
     Ok(())
 }
@@ -464,6 +511,13 @@ mod unit_tests {
     }
 
     #[test]
+    fn test_count_alleles_with_kmers() {
+        assert_eq!(count_alleles_with_kmers(&[vec!["AAA"], vec!["GGG"]]), 2);
+        assert_eq!(count_alleles_with_kmers(&[vec![], vec!["GGG"]]), 1);
+        assert_eq!(count_alleles_with_kmers(&[vec![""], vec![]]), 0);
+    }
+
+    #[test]
     fn test_find_dup_kmers_across_var_end_to_end() {
         let dir = tempfile::tempdir().expect("tempdir");
         let index_path = dir.path().join("index.txt");
@@ -482,6 +536,7 @@ mod unit_tests {
         find_dup_kmers_across_var(
             index_path.to_str().expect("path"),
             output_path.to_str().expect("path"),
+            0,
         )
         .expect("dedup");
         let result = std::fs::read_to_string(&output_path).expect("read output");
@@ -491,5 +546,125 @@ mod unit_tests {
             "1,1,200,CCCC,REF|ALT,CCCC|CCGG,0|1,|GGG\n",
         );
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_find_dup_kmers_across_var_min_alleles_drops_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let index_path = dir.path().join("index.txt");
+        let output_path = dir.path().join("dedup.txt");
+        // Variant 1 keeps 1 k-mer in each allele after dedup (CCC, TTT unique).
+        // Variant 2 loses its only k-mer (AAA appears three times -> removed),
+        // leaving both alleles empty.
+        // Variant 3 has a pre-existing empty allele and GGG (unique) in allele 1.
+        std::fs::write(
+            &index_path,
+            concat!(
+                "0,1,100,AAAA,REF|ALT,AAAA|ACAA,1|1,CCC|TTT\n",
+                "1,1,200,CCCC,REF|ALT,CCCC|CCGG,1|1,AAA|AAA\n",
+                "2,1,300,TTTT,REF|ALT,TTTT|TTGG,1|0,GGG|\n",
+            ),
+        )
+        .expect("write index");
+        // min_alleles = 1: variant 2 is dropped (0 alleles with k-mers),
+        // variants 1 and 3 stay.
+        find_dup_kmers_across_var(
+            index_path.to_str().expect("path"),
+            output_path.to_str().expect("path"),
+            1,
+        )
+        .expect("dedup");
+        let result = std::fs::read_to_string(&output_path).expect("read output");
+        let expected = concat!(
+            "0,1,100,AAAA,REF|ALT,AAAA|ACAA,1|1,CCC|TTT\n",
+            // GGG is unique -> retained; the empty allele yields 0.
+            "2,1,300,TTTT,REF|ALT,TTTT|TTGG,1|0,GGG|\n",
+        );
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_find_dup_kmers_across_var_min_alleles_two() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let index_path = dir.path().join("index.txt");
+        let output_path = dir.path().join("dedup.txt");
+        std::fs::write(
+            &index_path,
+            concat!(
+                "0,1,100,AAAA,REF|ALT,AAAA|ACAA,1|1,CCC|TTT\n",
+                "1,1,200,CCCC,REF|ALT,CCCC|CCGG,0|1,|GGG\n",
+            ),
+        )
+        .expect("write index");
+        // min_alleles = 2: variant 2 has only one allele with a k-mer -> dropped.
+        find_dup_kmers_across_var(
+            index_path.to_str().expect("path"),
+            output_path.to_str().expect("path"),
+            2,
+        )
+        .expect("dedup");
+        let result = std::fs::read_to_string(&output_path).expect("read output");
+        let expected = "0,1,100,AAAA,REF|ALT,AAAA|ACAA,1|1,CCC|TTT\n";
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_remove_ref_kmers_min_alleles() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let index_path = dir.path().join("index.txt");
+        let output_path = dir.path().join("dedup.txt");
+        // Variant 1: AAA in allele 0 is a reference k-mer -> removed, allele 0
+        // becomes empty; allele 1 (TTT) survives.
+        // Variant 2: both alleles are reference k-mers -> both empty.
+        std::fs::write(
+            &index_path,
+            concat!(
+                "0,1,100,AAAA,REF|ALT,AAAA|ACAA,1|1,AAA|TTT\n",
+                "1,1,200,CCCC,REF|ALT,CCCC|CCGG,1|1,GGG|CCC\n",
+            ),
+        )
+        .expect("write index");
+        let mut ref_hashset = HashSet::new();
+        ref_hashset.insert("AAA".to_string());
+        ref_hashset.insert("GGG".to_string());
+        ref_hashset.insert("CCC".to_string());
+
+        // min_alleles = 0 keeps all rows.
+        remove_ref_kmers(
+            index_path.to_str().expect("path"),
+            output_path.to_str().expect("path"),
+            ref_hashset.clone(),
+            0,
+        )
+        .expect("dedup");
+        let result = std::fs::read_to_string(&output_path).expect("read output");
+        let expected = concat!(
+            "0,1,100,AAAA,REF|ALT,AAAA|ACAA,0|1,|TTT\n",
+            "1,1,200,CCCC,REF|ALT,CCCC|CCGG,0|0,|\n",
+        );
+        assert_eq!(result, expected);
+
+        // min_alleles = 1 drops variant 2 (no alleles left with k-mers).
+        remove_ref_kmers(
+            index_path.to_str().expect("path"),
+            output_path.to_str().expect("path"),
+            ref_hashset.clone(),
+            1,
+        )
+        .expect("dedup");
+        let result = std::fs::read_to_string(&output_path).expect("read output");
+        let expected = "0,1,100,AAAA,REF|ALT,AAAA|ACAA,0|1,|TTT\n";
+        assert_eq!(result, expected);
+
+        // min_alleles = 2 drops both variants.
+        remove_ref_kmers(
+            index_path.to_str().expect("path"),
+            output_path.to_str().expect("path"),
+            ref_hashset,
+            2,
+        )
+        .expect("dedup");
+        let result = std::fs::read_to_string(&output_path).expect("read output");
+        assert_eq!(result, "");
     }
 }

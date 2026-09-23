@@ -40,6 +40,13 @@ enum Commands {
         index: String,
         #[arg(short, long, help = "name of deduplicated index")]
         output: String,
+        #[arg(
+            short = 'm',
+            long,
+            default_value_t = 0,
+            help = "Drop index rows unless at least this many alleles have >= 1 allele-specific k-mer (0 keeps all rows)"
+        )]
+        min_alleles: usize,
         #[command(flatten)]
         verbosity: clap_verbosity_flag::Verbosity,
     },
@@ -100,6 +107,13 @@ enum Commands {
             help = "vcf file of variations between reference and other genomes"
         )]
         vcf: String,
+        #[arg(
+            short = 'm',
+            long,
+            default_value_t = 0,
+            help = "Drop index rows unless at least this many alleles have >= 1 allele-specific k-mer (0 keeps all rows)"
+        )]
+        min_alleles: usize,
         #[command(flatten)]
         verbosity: clap_verbosity_flag::Verbosity,
     },
@@ -175,30 +189,38 @@ fn main() {
                 count_output,
             );
         }
-        Commands::VarDedup { index, output, .. } => {
+        Commands::VarDedup {
+            index,
+            output,
+            min_alleles,
+            ..
+        } => {
             log::info!(
-                "Deduplicating index across variants: INDEX: {} OUTPUT: {}",
+                "Deduplicating index across variants: INDEX: {} OUTPUT: {} MIN_ALLELES: {}",
                 index,
-                output
+                output,
+                min_alleles
             );
-            let _ = dedup::find_dup_kmers_across_var(index, output);
+            let _ = dedup::find_dup_kmers_across_var(index, output, *min_alleles);
         }
         Commands::RefDedup {
             index,
             output,
             fasta,
             vcf,
+            min_alleles,
             ..
         } => {
             log::info!(
-                "Deduplicating index of reference k-mers: INDEX: {} OUTPUT: {} FASTA: {} VCF: {}",
+                "Deduplicating index of reference k-mers: INDEX: {} OUTPUT: {} FASTA: {} VCF: {} MIN_ALLELES: {}",
                 index,
                 output,
                 fasta,
-                vcf
+                vcf,
+                min_alleles
             );
             let ref_hash = dedup::reference_hashset(index, fasta, vcf);
-            let _ = dedup::remove_ref_kmers(index, output, ref_hash);
+            let _ = dedup::remove_ref_kmers(index, output, ref_hash, *min_alleles);
         }
         Commands::Call {
             index,
