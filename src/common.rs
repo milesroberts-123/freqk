@@ -5,20 +5,31 @@ use std::io::BufRead;
 use std::io::BufReader;
 use std::io::Write;
 
-/// Get k-mer length from the first line of an index file.
+/// Get k-mer length from the first line of an index file that has a non-empty
+/// k-mer. All alleles of a variant share the same k-mer length, so the first
+/// non-empty k-mer of any allele is taken. Returns an error if no line in the
+/// index yields k > 0.
 pub fn k_from_index(index: &str) -> Result<i64, io::Error> {
     let file = File::open(index)?;
-    let mut reader = BufReader::new(file);
-    let mut first_line = String::new();
-    reader.read_line(&mut first_line)?;
-    let split_line: Vec<&str> = first_line.split(',').collect();
-    let kmers = split_line[7];
-    let kmers_list: Vec<&str> = kmers.split('|').collect();
-    let kmers_by_allele: Vec<Vec<&str>> =
-        kmers_list.iter().map(|s| s.split(';').collect()).collect();
-    let first_inner_vec = &kmers_by_allele[0];
-    let first_element = first_inner_vec[0];
-    Ok(first_element.len() as i64)
+    let reader = BufReader::new(file);
+    for line_result in reader.lines() {
+        let line = line_result?;
+        let split_line: Vec<&str> = line.split(',').collect();
+        if split_line.len() < 8 {
+            continue;
+        }
+        for kmers_by_allele in split_line[7].split('|') {
+            for kmer in kmers_by_allele.split(';') {
+                if !kmer.is_empty() {
+                    return Ok(kmer.len() as i64);
+                }
+            }
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "no k-mer length > 0 found in index",
+    ))
 }
 
 /// Read chromosome lengths from a `.fai` file.
@@ -140,5 +151,63 @@ mod unit_tests {
         let result = get_canonical_kmers(test_seq, 10);
         let expected = vec!["ATGCCAGTTA", "TGCCAGTTAA", "GCCAGTTAAC", "CCAGTTAACA"];
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_k_from_index_skips_empty_kmers_in_first_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let index_path = dir.path().join("index.txt");
+        // First line: empty-allele pseudo-entry with no k-mers (field 8 = "|").
+        // Second line: one allele with three 5-mers.
+        std::fs::write(
+            &index_path,
+            concat!(
+                "0,1,100,AAAAA,REF|ALT,AAAAA|ACAAA,0|1,|\n",
+                "1,1,200,CCCCC,REF|ALT,CCCCC|CCGGG,1|1,ACACA;CCCCT;TTTAA|GGGGG\n",
+            ),
+        )
+        .unwrap();
+        let k = k_from_index(index_path.to_str().unwrap()).unwrap();
+        assert_eq!(k, 5);
+    }
+
+    #[test]
+    fn test_k_from_index_uses_second_allele_when_first_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let index_path = dir.path().join("index.txt");
+        // Allele 0 has no k-mers (pseudo-entry ""), allele 1 has 5-mers.
+        std::fs::write(
+            &index_path,
+            "0,1,100,AAAAA,REF|ALT,AAAAA|ACAAA,0|1,|GGGGG\n",
+        )
+        .unwrap();
+        let k = k_from_index(index_path.to_str().unwrap()).unwrap();
+        assert_eq!(k, 5);
+    }
+
+    #[test]
+    fn test_k_from_index_skips_short_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let index_path = dir.path().join("index.txt");
+        std::fs::write(
+            &index_path,
+            concat!("not an index line\n", "0,1,100,CCCC,REF,CCCC,1,ACGTA\n"),
+        )
+        .unwrap();
+        let k = k_from_index(index_path.to_str().unwrap()).unwrap();
+        assert_eq!(k, 5);
+    }
+
+    #[test]
+    fn test_k_from_index_errors_when_no_kmer_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let index_path = dir.path().join("index.txt");
+        std::fs::write(
+            &index_path,
+            concat!("0,1,100,AAAA,REF|ALT,AAAA|ACAA,0|1,|\n"),
+        )
+        .unwrap();
+        let result = k_from_index(index_path.to_str().unwrap());
+        assert!(result.is_err());
     }
 }
