@@ -1,5 +1,4 @@
 use clap::{Parser, Subcommand};
-use itertools::izip;
 
 mod call;
 mod common;
@@ -213,9 +212,21 @@ fn main() {
             ..
         } => {
             log::info!("Finding hetmers in k-mer counts");
-            for (input, output, minimum, coverage, pool, alpha, beta, sigma) in
-                izip!(inputs, outputs, minimums, coverages, pools, alphas, betas, sigmas)
-            {
+            let params = inputs
+                .iter()
+                .zip(outputs.iter())
+                .zip(minimums.iter())
+                .zip(coverages.iter())
+                .zip(pools.iter())
+                .zip(alphas.iter())
+                .zip(betas.iter())
+                .zip(sigmas.iter())
+                .map(
+                    |(((((((input, output), minimum), coverage), pool), alpha), beta), sigma)| {
+                        (input, output, minimum, coverage, pool, alpha, beta, sigma)
+                    },
+                );
+            for (input, output, minimum, coverage, pool, alpha, beta, sigma) in params {
                 hetmers::kmers_to_hetmers(
                     input, output, *minimum, *alleles, *pool, *coverage, *alpha, *beta, *sigma,
                 );

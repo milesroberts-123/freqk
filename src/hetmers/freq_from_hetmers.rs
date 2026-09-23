@@ -1,5 +1,3 @@
-use statrs::function::gamma::gamma;
-
 /// Parse comma-joined count pairs into (minor, major) count tuples.
 /// Pairs that do not have exactly two parseable counts become `None`.
 fn parse_count_pairs(count_pairs: &[String]) -> Vec<Option<(f64, f64)>> {
@@ -51,12 +49,17 @@ pub fn high_cov_hetmers(count_pairs: &[String], sigma: f64, n: i32, cov: f64) ->
         .collect()
 }
 
+/// Compute the factorial of a non-negative integer.
+fn factorial(x: usize) -> f64 {
+    (1..=x).map(|i| i as f64).product()
+}
+
 /// Compute the truncation constant for a Poisson distribution.
 pub fn truncation_constant(c: usize, lambda: f64) -> f64 {
     let sum: f64 = (0..c)
         .map(|x| {
             let numerator = (-lambda).exp() * lambda.powi(x as i32);
-            let denominator = gamma((x + 1) as f64); // factorial(x)
+            let denominator = factorial(x); // == gamma(x + 1)
             numerator / denominator
         })
         .sum();

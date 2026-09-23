@@ -1,12 +1,22 @@
 use crate::common;
-use bio::bio_types::genome::AbstractLocus;
-use bio::io::fasta::IndexedReader;
 use rust_htslib::bcf::Read;
 use rust_htslib::bcf::Reader;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufWriter, Write};
+
+/// Get the contig name of a VCF record via its own header, without the
+/// `bio-types` `AbstractLocus` trait.
+fn record_contig(record: &rust_htslib::bcf::Record) -> &str {
+    std::str::from_utf8(
+        record
+            .header()
+            .rid2name(record.rid().expect("rid not set"))
+            .expect("unable to find rid in header"),
+    )
+    .expect("unable to interpret contig name as UTF-8")
+}
 
 /// Remove k-mers shared across alleles of the same locus.
 fn find_dup_kmers(mut data: Vec<Vec<String>>) -> Vec<Vec<String>> {
@@ -31,7 +41,8 @@ fn find_dup_kmers(mut data: Vec<Vec<String>>) -> Vec<Vec<String>> {
 /// Build an index of allele-specific k-mers from a VCF and indexed FASTA.
 pub fn index_workflow(vcf_path: &str, fasta_path: &str, output_path: &str, k: i64) {
     let mut vcf_reader = Reader::from_path(vcf_path).expect("Error opening file.");
-    let mut faidx = IndexedReader::from_file(&fasta_path.to_string()).unwrap();
+    let faidx =
+        rust_htslib::faidx::Reader::from_path(fasta_path).expect("Error opening FASTA index.");
     let chrom_lengths = common::read_fai(fasta_path);
     log::info!("Chromosome lengths:");
     log::info!("{:?}", chrom_lengths);
@@ -46,7 +57,7 @@ pub fn index_workflow(vcf_path: &str, fasta_path: &str, output_path: &str, k: i6
         i += 1;
         let record = record_result.expect("Failed to read record!");
         let pos = record.pos() - 1;
-        let chrom = record.contig();
+        let chrom = record_contig(&record);
         let mut ku = k as usize;
         log::debug!(
             "Extracting allele sequences for CHROM: {} POS: {}...",
@@ -152,7 +163,7 @@ pub fn index_workflow(vcf_path: &str, fasta_path: &str, output_path: &str, k: i6
         if let Some(next_ref) = vcf_iterator.peek() {
             let next_result = next_ref.as_ref().unwrap();
             let pos_next = next_result.pos() - 1;
-            let chrom_next = next_result.contig();
+            let chrom_next = record_contig(next_result);
             if (pos_next - pos_prev <= k) && (chrom_next == chrom_prev) {
                 log::warn!("Current variant (CHROM: {} POS: {}) within k bp of previous and next variant. Skipping current variant.", chrom, pos);
                 pos_prev = pos;
@@ -188,17 +199,13 @@ pub fn index_workflow(vcf_path: &str, fasta_path: &str, output_path: &str, k: i6
             region_start,
             region_end
         );
-        faidx
-            .fetch(
-                chrom,
-                region_start.try_into().unwrap(),
-                region_end.try_into().unwrap(),
-            )
-            .expect("Couldn't fetch interval");
-        let mut seq = Vec::new();
-        faidx.read(&mut seq).expect("Couldn't read the interval");
-        let seq_string =
-            common::stand_seq(std::str::from_utf8(&seq).expect("Invalid UTF-8 sequence"));
+        let seq_string = common::fetch_fasta(
+            &faidx,
+            chrom,
+            region_start.try_into().unwrap(),
+            region_end.try_into().unwrap(),
+        )
+        .expect("Couldn't fetch interval");
         log::debug!("Sequence length: {}", seq_string.chars().count());
         let mut var_seqs = Vec::new();
         log::debug!(

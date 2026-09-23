@@ -5,6 +5,35 @@ use std::io::BufRead;
 use std::io::BufReader;
 use std::io::Write;
 
+/// Fetch a subsequence from a samtools-faidx-indexed FASTA and return it as an
+/// uppercase ATGC/N string. `start` is 0-based inclusive, `stop` is 0-based
+/// exclusive (matching `bio::io::fasta::IndexedReader::fetch`), so the htslib
+/// call uses `stop - 1` because its end is inclusive. Returns an error if the
+/// interval is out of bounds or the contig is missing.
+pub fn fetch_fasta(
+    faidx: &rust_htslib::faidx::Reader,
+    chrom: &str,
+    start: u64,
+    stop: u64,
+) -> Result<String, Box<dyn std::error::Error>> {
+    if stop == 0 || start >= stop {
+        return Err(format!("Invalid interval {}:{}-{}", chrom, start, stop).into());
+    }
+    let seq = fetch_fasta_htslib_raw(faidx, chrom, start, stop - 1)?;
+    Ok(stand_seq(std::str::from_utf8(&seq)?))
+}
+
+/// Raw htslib fetch: both ends 0-based inclusive.
+fn fetch_fasta_htslib_raw(
+    faidx: &rust_htslib::faidx::Reader,
+    chrom: &str,
+    begin: u64,
+    end: u64,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let seq = faidx.fetch_seq(chrom, begin as usize, end as usize)?;
+    Ok(seq.to_vec())
+}
+
 /// Get k-mer length from the first line of an index file that has a non-empty
 /// k-mer. All alleles of a variant share the same k-mer length, so the first
 /// non-empty k-mer of any allele is taken. Returns an error if no line in the

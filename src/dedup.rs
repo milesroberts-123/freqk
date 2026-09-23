@@ -1,5 +1,3 @@
-use bio::bio_types::genome::AbstractLocus;
-use bio::io::fasta::IndexedReader;
 use rust_htslib::bcf::Read;
 use rust_htslib::bcf::Reader;
 use std::collections::HashMap;
@@ -9,6 +7,18 @@ use std::io::{self, prelude::*, BufReader};
 use std::io::{BufWriter, Write};
 
 use crate::common;
+
+/// Get the contig name of a VCF record via its own header, without the
+/// `bio-types` `AbstractLocus` trait.
+fn record_contig(record: &rust_htslib::bcf::Record) -> &str {
+    std::str::from_utf8(
+        record
+            .header()
+            .rid2name(record.rid().expect("rid not set"))
+            .expect("unable to find rid in header"),
+    )
+    .expect("unable to interpret contig name as UTF-8")
+}
 
 /// Read the k-mer field (column 7) of an index file into a 3D array:
 /// one entry per index line, one inner vec per allele, one string per k-mer.
@@ -53,18 +63,23 @@ pub fn reference_hashset(index: &str, fasta_path: &str, vcf_path: &str) -> HashS
     log::info!("k is: {:?}", k);
     log::info!("Build hashset of reference k-mers...");
     let mut vcf_reader = Reader::from_path(vcf_path).expect("Error opening file.");
-    let mut faidx = IndexedReader::from_file(&fasta_path.to_string()).unwrap();
+    let faidx =
+        rust_htslib::faidx::Reader::from_path(fasta_path).expect("Error opening FASTA index.");
     let chrom_lengths = common::read_fai(fasta_path);
     log::info!("Chromosome lengths:");
     log::info!("{:?}", chrom_lengths);
     let mut start = 1;
     let mut ref_kmers_hashset = HashSet::new();
     let mut chrom_visited: HashSet<String> = HashSet::new();
+    // Interval left unfetched-read by a `fetch`-only branch, to be read by the
+    // shared read block below, mirroring the deferred-read flow of the original
+    // bio IndexedReader code (fetch stores the interval, read consumes it).
+    let mut pending: Option<(String, i64, i64)> = None;
     let mut vcf_iterator = vcf_reader.records().peekable();
     while let Some(record_result) = vcf_iterator.next() {
         let record = record_result.expect("Failure reading record");
         let pos = record.pos() - 1;
-        let chrom = record.contig();
+        let chrom = record_contig(&record);
         chrom_visited.insert(chrom.into());
         let end = pos - k;
         log::debug!("Processing record CHROM: {} POS: {}", chrom, pos);
@@ -99,7 +114,7 @@ pub fn reference_hashset(index: &str, fasta_path: &str, vcf_path: &str) -> HashS
         if let Some(next_ref) = vcf_iterator.peek() {
             let next_result = next_ref.as_ref().unwrap();
             let pos_next = next_result.pos() - 1;
-            let chrom_next = next_result.contig();
+            let chrom_next = record_contig(next_result);
             log::debug!("Next record is CHROM: {} POS: {}", chrom_next, pos_next);
             if chrom != chrom_next {
                 log::info!(
@@ -120,14 +135,13 @@ pub fn reference_hashset(index: &str, fasta_path: &str, vcf_path: &str) -> HashS
                         start,
                         end
                     );
-                    faidx
-                        .fetch(chrom, start.try_into().unwrap(), end.try_into().unwrap())
-                        .expect("Could not fetch interval");
-                    log::debug!("Reading sequence...");
-                    let mut seq = Vec::new();
-                    faidx.read(&mut seq).expect("Could not read interval");
-                    let seq_string =
-                        String::from_utf8(seq.to_vec()).expect("Invalid UTF-8 sequence");
+                    let seq_string = common::fetch_fasta(
+                        &faidx,
+                        chrom,
+                        start.try_into().unwrap(),
+                        end.try_into().unwrap(),
+                    )
+                    .expect("Could not fetch interval");
                     log::debug!("Extract canonical k-mers...");
                     let ref_kmers: Vec<String> =
                         common::get_canonical_kmers(&seq_string, k as usize);
@@ -148,9 +162,9 @@ pub fn reference_hashset(index: &str, fasta_path: &str, vcf_path: &str) -> HashS
                         continue;
                     } else if start < *chrom_end {
                         log::debug!("start within k bp of chrom end, extracting");
-                        faidx
-                            .fetch(chrom, start.try_into().unwrap(), *chrom_end as u64)
-                            .expect("Could not fetch interval");
+                        // Fetch now, but the read (k-mer extraction) is deferred to
+                        // the shared read below, matching the original flow.
+                        pending = Some((chrom.to_string(), start, *chrom_end));
                         start = 1;
                     }
                 } else {
@@ -159,9 +173,9 @@ pub fn reference_hashset(index: &str, fasta_path: &str, vcf_path: &str) -> HashS
                 }
             } else {
                 log::debug!("Extracting sequence: {}:{}-{}", chrom, start, end);
-                faidx
-                    .fetch(chrom, start.try_into().unwrap(), end.try_into().unwrap())
-                    .expect("Could not fetch interval");
+                // Fetch only; the read is deferred to the shared read below,
+                // matching the original flow.
+                pending = Some((chrom.to_string(), start, end));
                 start = pos + k + (ref_allele_len - 1);
             }
         } else {
@@ -177,13 +191,13 @@ pub fn reference_hashset(index: &str, fasta_path: &str, vcf_path: &str) -> HashS
                     start,
                     end
                 );
-                faidx
-                    .fetch(chrom, start.try_into().unwrap(), end.try_into().unwrap())
-                    .expect("Could not fetch interval");
-                log::debug!("Reading sequence...");
-                let mut seq = Vec::new();
-                faidx.read(&mut seq).expect("Could not read interval");
-                let seq_string = String::from_utf8(seq.to_vec()).expect("Invalid UTF-8 sequence");
+                let seq_string = common::fetch_fasta(
+                    &faidx,
+                    chrom,
+                    start.try_into().unwrap(),
+                    end.try_into().unwrap(),
+                )
+                .expect("Could not fetch interval");
                 log::debug!("Extract canonical k-mers...");
                 let ref_kmers: Vec<String> = common::get_canonical_kmers(&seq_string, k as usize);
                 log::debug!("Putting k-mers into hashset...");
@@ -202,9 +216,9 @@ pub fn reference_hashset(index: &str, fasta_path: &str, vcf_path: &str) -> HashS
                     break;
                 } else if start < *chrom_end {
                     log::debug!("POS not within k bp of chrom end, extracting");
-                    faidx
-                        .fetch(chrom, (pos + k).try_into().unwrap(), *chrom_end as u64)
-                        .expect("Could not fetch interval");
+                    // Fetch now, but the read (k-mer extraction) is deferred to
+                    // the shared read below, matching the original flow.
+                    pending = Some((chrom.to_string(), pos + k, *chrom_end));
                     start = 1;
                 }
             } else {
@@ -212,9 +226,15 @@ pub fn reference_hashset(index: &str, fasta_path: &str, vcf_path: &str) -> HashS
             }
         }
         log::debug!("Reading sequence...");
-        let mut seq = Vec::new();
-        faidx.read(&mut seq).expect("Could not read interval");
-        let seq_string = String::from_utf8(seq.to_vec()).expect("Invalid UTF-8 sequence");
+        let (pending_chrom, pending_start, pending_end) =
+            pending.take().expect("No fetched interval to read");
+        let seq_string = common::fetch_fasta(
+            &faidx,
+            &pending_chrom,
+            pending_start.try_into().unwrap(),
+            pending_end.try_into().unwrap(),
+        )
+        .expect("Could not read interval");
         log::debug!("Extract canonical k-mers...");
         let ref_kmers: Vec<String> = common::get_canonical_kmers(&seq_string, k as usize);
         log::debug!("Putting k-mers into hashset...");
@@ -242,13 +262,8 @@ pub fn reference_hashset(index: &str, fasta_path: &str, vcf_path: &str) -> HashS
                 unvis_chrom,
                 chrom_end
             );
-            faidx
-                .fetch(&unvis_chrom, 1, *chrom_end as u64)
+            let seq_string = common::fetch_fasta(&faidx, &unvis_chrom, 1, *chrom_end as u64)
                 .expect("Could not fetch interval");
-            log::debug!("Reading sequence...");
-            let mut seq = Vec::new();
-            faidx.read(&mut seq).expect("Could not read interval");
-            let seq_string = String::from_utf8(seq.to_vec()).expect("Invalid UTF-8 sequence");
             log::debug!("Extract canonical k-mers...");
             let ref_kmers: Vec<String> = common::get_canonical_kmers(&seq_string, k as usize);
             log::debug!("Putting k-mers into hashset...");
