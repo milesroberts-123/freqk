@@ -32,6 +32,11 @@ target/debug/freqk call -i ref_index.txt -c counts_by_allele.txt -o calls.txt
   before every push, as its own `chore: bump version to X.Y.Z` commit:
   `feat:` → minor, `fix:`/`refactor:`/`perf:` → patch, `docs:`/`chore:` only →
   no bump. Verify `freqk --version` prints the new number.
+- Before every push, export the current session transcript and commit it:
+  `opencode export <session-id> > /tmp/<session-id>.json`, validate it parses as
+  JSON, compress with `xz -9` to `sessions/<session-id>.json.xz`, commit as
+  `chore: update session transcript export` (or `chore: add ...` when new), then
+  push. Keep transcripts in `sessions/`.
 
 ## Input requirements
 - FASTA must be `samtools faidx`-indexed (`.fai` alongside it).
