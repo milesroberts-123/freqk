@@ -108,6 +108,8 @@ pub fn count_target_kmers_in_reads_files(
 }
 
 /// Write k-mer counts to a file, unpacking packed k-mer keys of length `k`.
+/// Rows are sorted lexicographically by k-mer string so output is deterministic
+/// across runs and directly usable by hetmers (which requires sorted input).
 pub fn write_kmers(
     kmer_counts: &HashMap<KmerKey, usize>,
     k: usize,
@@ -115,8 +117,14 @@ pub fn write_kmers(
 ) -> io::Result<()> {
     let mut file = File::create(output)?;
 
-    for (key, value) in kmer_counts.iter() {
-        writeln!(file, "{}\t{}", key.to_kmer(k), value)?;
+    let mut rows: Vec<(String, &usize)> = kmer_counts
+        .iter()
+        .map(|(key, value)| (key.to_kmer(k), value))
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+
+    for (kmer, value) in rows {
+        writeln!(file, "{}\t{}", kmer, value)?;
     }
 
     Ok(())
@@ -180,13 +188,24 @@ pub fn count_workflow(
     let k = k.expect("Cannot parse kmer length from index.");
     let kmer_counts =
         count_target_kmers_in_reads_files(index, reads_files, k, nthreads, print_frequency);
-    let _ = write_kmers(&kmer_counts, k as usize, count_output);
+    if let Err(e) = write_kmers(&kmer_counts, k as usize, count_output) {
+        log::error!("Writing k-mer counts to {} failed: {}", count_output, e);
+        std::process::exit(1);
+    }
     log::debug!("Combining k-mer counts by allele...");
     let counts_by_allele = combine_counts_by_allele(index, &kmer_counts);
     log::debug!("Writing counts by allele...");
-    let _ = common::write_strings(
-        counts_by_allele.expect("Error writing counts by allele"),
-        freq_output,
-    );
+    match counts_by_allele {
+        Ok(strings) => {
+            if let Err(e) = common::write_strings(strings, freq_output) {
+                log::error!("Writing counts by allele to {} failed: {}", freq_output, e);
+                std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            log::error!("Combining counts by allele failed: {}", e);
+            std::process::exit(1);
+        }
+    }
     log::debug!("Successfully wrote counts by allele!");
 }
