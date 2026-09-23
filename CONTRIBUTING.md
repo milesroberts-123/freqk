@@ -38,7 +38,18 @@
   Measured on a 6.2M k-mer index: 996 MB -> 501 MB with 1 thread, 2.49 GB -> 505 MB
   with 4 threads; counts byte-identical before/after.
 
+- [x] stream ref-dedup in a single pass (like var-dedup): remove_ref_kmers no
+  longer loads the whole index via read_index_kmers; each line is parsed,
+  filtered against the reference hashset, and written immediately. RSS is
+  flat (~250 MB) from 340 to 100k variants; output byte-identical.
+
 - [x] add unit tests
+
+- [x] add integration test (tests/pipeline.rs): runs the README quick-start
+  against the tracked fixtures and asserts the canonical calls.txt and
+  counts_by_kmer.txt md5s; runs in CI.
+
+- [x] add cargo test + cargo clippy to CI (linter.yml test job)
 
 - [x] write counts_by_kmer table in deterministic sorted order (rows sorted
   lexicographically by k-mer, stable across runs and thread counts); hetmers
@@ -46,12 +57,14 @@
 
 - [ ] add methods to structs
 
-- [ ] cleanup hetmers subcommand: includes deterministic output ordering —
-  group_hashes/extract_hetmers use a HashMap, so the six output files (seqs,
-  counts, hashes, bad_hetmers, bayes_states, empirical_freqs) shuffle rows
-  between runs; switch to BTreeMap or sort before write. Also: load_kmers
-  should reject empty k-mer strings with a clear error instead of panicking
-  downstream.
+- [x] cleanup hetmers subcommand: group_hashes/extract_hetmers now use a
+  BTreeMap, so the six output files (seqs, counts, hashes, bad_hetmers,
+  bayes_states, empirical_freqs) are in ascending-hash order and deterministic
+  across runs. load_kmers rejects empty k-mer strings and unreadable files
+  with clear errors; hetmers inputs are pre-flighted with ensure_readable.
+  Remaining polish (separate to-dos): make load_kmers parse the whole table
+  before running input checks, unify hetmers CLI list style (space-separated)
+  with count (comma-separated), methods on structs.
 
 - [ ] add q-mers?
 
