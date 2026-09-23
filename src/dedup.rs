@@ -20,26 +20,6 @@ fn record_contig(record: &rust_htslib::bcf::Record) -> &str {
     .expect("unable to interpret contig name as UTF-8")
 }
 
-/// Read the k-mer field (column 7) of an index file into a 3D array:
-/// one entry per index line, one inner vec per allele, one string per k-mer.
-fn read_index_kmers(index: &str) -> Result<Vec<Vec<Vec<String>>>, io::Error> {
-    let file = File::open(index)?;
-    let reader = BufReader::new(file);
-    let mut data = Vec::new();
-    for line_result in reader.lines() {
-        let line = line_result?;
-        let fields: Vec<&str> = line.split(',').collect();
-        let kmers = fields[7];
-        let kmers_list: Vec<&str> = kmers.split('|').collect();
-        let kmers_by_allele: Vec<Vec<String>> = kmers_list
-            .iter()
-            .map(|s| s.split(';').map(|x| x.to_string()).collect())
-            .collect();
-        data.push(kmers_by_allele);
-    }
-    Ok(data)
-}
-
 /// Pack a canonical ATGC k-mer into an integer (2 bits per base) for cheap
 /// hashing, and key for counting k-mers in a hash map: packed `u64` for
 /// k <= 31 (the normal case); heap `String` fallback for longer k-mers so
@@ -287,34 +267,48 @@ fn count_alleles_with_kmers<S: AsRef<str>>(dedup_kmers: &[Vec<S>]) -> usize {
 }
 
 /// Remove k-mers found in the reference from an index and write a new index.
-/// Rows are dropped entirely when fewer than `min_alleles` alleles retain at
-/// least one k-mer (0 keeps every row).
+///
+/// Streams the index in a single pass instead of loading it into memory: each
+/// line is parsed, its k-mers filtered against the reference hashset, and the
+/// line rewritten immediately. Memory is proportional to one index line, not
+/// index size. Rows are dropped entirely when fewer than `min_alleles` alleles
+/// retain at least one k-mer (0 keeps every row).
 pub fn remove_ref_kmers(
     index: &str,
     output: &str,
     ref_hashset: HashSet<String>,
     min_alleles: usize,
 ) -> Result<(), io::Error> {
-    log::info!("Opening index...");
-    let mut data = read_index_kmers(index)?;
-    log::info!("Removing k-mers found in non-variable sequences...");
-    for inner_vec in &mut data {
-        for inner_inner_vec in inner_vec {
-            inner_inner_vec.retain(|s| !ref_hashset.contains(s));
-        }
-    }
-    log::info!("Writing new index...");
+    log::info!("Writing new index, removing k-mers found in non-variable sequences...");
     let mut buffered_file = BufWriter::new(File::create(output)?);
     let file = File::open(index)?;
     let reader = BufReader::new(file);
     let mut dropped = 0;
-    for (line, dedup_kmers) in reader.lines().zip(data.iter()) {
-        let line = line_result_string(line)?;
-        if min_alleles > 0 && count_alleles_with_kmers(dedup_kmers) < min_alleles {
+    let mut written = 0;
+    for line_result in reader.lines() {
+        let line = line_result?;
+        let fields: Vec<&str> = line.split(',').collect();
+
+        let kmers_by_allele: Vec<Vec<&str>> = fields[7]
+            .split('|')
+            .map(|s| s.split(';').collect())
+            .collect();
+        let dedup_kmers: Vec<Vec<&str>> = kmers_by_allele
+            .iter()
+            .map(|inner_vec| {
+                inner_vec
+                    .iter()
+                    .filter(|s| !ref_hashset.contains(**s))
+                    .cloned()
+                    .collect()
+            })
+            .collect();
+
+        if min_alleles > 0 && count_alleles_with_kmers(&dedup_kmers) < min_alleles {
             dropped += 1;
             continue;
         }
-        let fields: Vec<&str> = line.split(',').collect();
+        written += 1;
 
         let num_kmers_per_allele = dedup_kmers
             .iter()
@@ -351,12 +345,8 @@ pub fn remove_ref_kmers(
             min_alleles
         );
     }
+    log::info!("Wrote {} index rows", written);
     Ok(())
-}
-
-/// Unwrap a `io::Result<String>` line into a `String`, propagating errors.
-fn line_result_string(line_result: Result<String, io::Error>) -> Result<String, io::Error> {
-    line_result
 }
 
 /// Remove k-mers shared across variants from an index and write a new index.

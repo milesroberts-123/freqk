@@ -216,8 +216,7 @@ pub fn get_canonical_kmers_packed(sequence: &str, k: usize) -> Vec<u64> {
     let mut forward: u64 = 0;
     let mut reverse: u64 = 0;
     let mut run_without_bad_char = 0;
-    for i in 0..codes.len() {
-        let code = codes[i];
+    for &code in codes.iter() {
         if code == 4 {
             forward = 0;
             reverse = 0;
