@@ -44,11 +44,13 @@ fn merge_hashmaps(vec_of_maps: Vec<HashMap<KmerKey, usize>>) -> HashMap<KmerKey,
 }
 
 /// Count indexed k-mers in reads, in parallel across `nthreads` threads.
+/// Progress is logged every `print_frequency` reads (per worker thread).
 pub fn count_target_kmers_in_reads(
     index: &str,
     reads: &str,
     k: i64,
     nthreads: usize,
+    print_frequency: usize,
 ) -> HashMap<KmerKey, usize> {
     let kmers_hashset = Arc::new(build_kmer_hashset(index).expect("Error loading index"));
     let k = k as usize;
@@ -60,7 +62,7 @@ pub fn count_target_kmers_in_reads(
                 let mut num_records = 0;
                 for record_set in record_sets {
                     for record in record_set.iter() {
-                        if num_records % 10000 == 0 {
+                        if num_records % print_frequency == 0 {
                             log::info!("Reads processed: {}", num_records);
                         }
                         num_records += 1;
@@ -94,11 +96,12 @@ pub fn count_target_kmers_in_reads_files(
     reads_files: &[String],
     k: i64,
     nthreads: usize,
+    print_frequency: usize,
 ) -> HashMap<KmerKey, usize> {
     let mut merged_counts: HashMap<KmerKey, usize> = HashMap::new();
     for reads in reads_files {
         log::info!("Counting k-mers in reads file: {}", reads);
-        let file_counts = count_target_kmers_in_reads(index, reads, k, nthreads);
+        let file_counts = count_target_kmers_in_reads(index, reads, k, nthreads, print_frequency);
         merged_counts = merge_hashmaps(vec![merged_counts, file_counts]);
     }
     merged_counts
@@ -166,6 +169,7 @@ pub fn count_workflow(
     index: &str,
     reads_files: &[String],
     nthreads: usize,
+    print_frequency: usize,
     freq_output: &str,
     count_output: &str,
 ) {
@@ -174,7 +178,8 @@ pub fn count_workflow(
     log::info!("k is: {:?}", k);
     log::debug!("Counting indexed k-mers in reads...");
     let k = k.expect("Cannot parse kmer length from index.");
-    let kmer_counts = count_target_kmers_in_reads_files(index, reads_files, k, nthreads);
+    let kmer_counts =
+        count_target_kmers_in_reads_files(index, reads_files, k, nthreads, print_frequency);
     let _ = write_kmers(&kmer_counts, k as usize, count_output);
     log::debug!("Combining k-mer counts by allele...");
     let counts_by_allele = combine_counts_by_allele(index, &kmer_counts);

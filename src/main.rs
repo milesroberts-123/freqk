@@ -62,6 +62,13 @@ enum Commands {
             help = "Number of threads to use (a copy of index will be loaded onto each thread)"
         )]
         nthreads: usize,
+        #[arg(
+            short = 'p',
+            long,
+            default_value_t = 10000,
+            help = "Print number of reads processed every print_frequency reads"
+        )]
+        print_frequency: usize,
         #[arg(short, long, help = "name of output for counts by allele")]
         freq_output: String,
         #[arg(short, long, help = "name of output for raw kmer counts")]
@@ -153,12 +160,20 @@ fn main() {
             index,
             reads,
             nthreads,
+            print_frequency,
             freq_output,
             count_output,
             ..
         } => {
-            log::info!("Counting k-mers: INDEX: {}, READS: {:?}, NTHREADS: {}, FREQ OUTPUT: {}, COUNT OUTPUT: {}", index, reads, nthreads, freq_output, count_output);
-            count::count_workflow(index, reads, *nthreads, freq_output, count_output);
+            log::info!("Counting k-mers: INDEX: {}, READS: {:?}, NTHREADS: {}, PRINT_FREQUENCY: {}, FREQ OUTPUT: {}, COUNT OUTPUT: {}", index, reads, nthreads, print_frequency, freq_output, count_output);
+            count::count_workflow(
+                index,
+                reads,
+                *nthreads,
+                *print_frequency,
+                freq_output,
+                count_output,
+            );
         }
         Commands::VarDedup { index, output, .. } => {
             log::info!(
