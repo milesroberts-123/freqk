@@ -32,15 +32,31 @@ pub fn build_kmer_hashset(index: &str) -> Result<HashSet<KmerKey>, io::Error> {
     Ok(kmers_hashset)
 }
 
+/// Merge per-thread count maps into a single map, summing values.
 fn merge_hashmaps(vec_of_maps: Vec<HashMap<KmerKey, usize>>) -> HashMap<KmerKey, usize> {
+    let start = std::time::Instant::now();
     let mut merged_map: HashMap<KmerKey, usize> = HashMap::new();
+    merged_map.reserve(vec_of_maps.iter().map(|map| map.len()).sum::<usize>());
 
     for map in vec_of_maps {
         for (key, value) in map {
             *merged_map.entry(key).or_insert(0) += value;
         }
     }
+    log::info!(
+        "Merged count maps: {} unique k-mers in {:.2?}",
+        merged_map.len(),
+        start.elapsed()
+    );
     merged_map
+}
+
+/// Add the counts of `map` into the accumulated map `acc`, consuming `map`.
+/// Avoids re-hashing `acc` when merging counts from several reads files.
+fn merge_into(acc: &mut HashMap<KmerKey, usize>, map: HashMap<KmerKey, usize>) {
+    for (key, value) in map {
+        *acc.entry(key).or_insert(0) += value;
+    }
 }
 
 /// Count indexed k-mers in reads, in parallel across `nthreads` threads.
@@ -102,7 +118,14 @@ pub fn count_target_kmers_in_reads_files(
     for reads in reads_files {
         log::info!("Counting k-mers in reads file: {}", reads);
         let file_counts = count_target_kmers_in_reads(index, reads, k, nthreads, print_frequency);
-        merged_counts = merge_hashmaps(vec![merged_counts, file_counts]);
+        let file_len = file_counts.len();
+        merge_into(&mut merged_counts, file_counts);
+        log::info!(
+            "Accumulated counts: {} unique k-mers (added {} from {})",
+            merged_counts.len(),
+            file_len,
+            reads
+        );
     }
     merged_counts
 }
@@ -215,4 +238,37 @@ pub fn count_workflow(
         }
     }
     log::debug!("Successfully wrote counts by allele!");
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    fn map_from(pairs: &[(&str, usize)]) -> HashMap<KmerKey, usize> {
+        pairs
+            .iter()
+            .map(|(kmer, count)| (KmerKey::from_kmer(kmer), *count))
+            .collect()
+    }
+
+    #[test]
+    fn test_merge_hashmaps_sums_overlapping_keys() {
+        let merged = merge_hashmaps(vec![
+            map_from(&[("AAA", 1), ("CCC", 2)]),
+            map_from(&[("AAA", 3), ("GGG", 4)]),
+            HashMap::new(),
+        ]);
+        assert_eq!(merged, map_from(&[("AAA", 4), ("CCC", 2), ("GGG", 4)]));
+    }
+
+    #[test]
+    fn test_merge_into_matches_merge_hashmaps() {
+        let mut acc = map_from(&[("AAA", 1), ("CCC", 2)]);
+        merge_into(&mut acc, map_from(&[("AAA", 3), ("GGG", 4)]));
+        let expected = merge_hashmaps(vec![
+            map_from(&[("AAA", 1), ("CCC", 2)]),
+            map_from(&[("AAA", 3), ("GGG", 4)]),
+        ]);
+        assert_eq!(acc, expected);
+    }
 }
