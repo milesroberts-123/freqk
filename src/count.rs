@@ -173,13 +173,15 @@ pub fn combine_counts_by_allele(
 }
 
 /// Count indexed k-mers in reads and write per-allele and per-k-mer counts.
+/// When `count_output` is None, the per-k-mer count table (and its sort) is
+/// skipped entirely.
 pub fn count_workflow(
     index: &str,
     reads_files: &[String],
     nthreads: usize,
     print_frequency: usize,
     freq_output: &str,
-    count_output: &str,
+    count_output: Option<&str>,
 ) {
     log::info!("Loading index at {} into a hashset...", index);
     let k = common::k_from_index(index);
@@ -188,9 +190,14 @@ pub fn count_workflow(
     let k = k.expect("Cannot parse kmer length from index.");
     let kmer_counts =
         count_target_kmers_in_reads_files(index, reads_files, k, nthreads, print_frequency);
-    if let Err(e) = write_kmers(&kmer_counts, k as usize, count_output) {
-        log::error!("Writing k-mer counts to {} failed: {}", count_output, e);
-        std::process::exit(1);
+    match count_output {
+        Some(count_output) => {
+            if let Err(e) = write_kmers(&kmer_counts, k as usize, count_output) {
+                log::error!("Writing k-mer counts to {} failed: {}", count_output, e);
+                std::process::exit(1);
+            }
+        }
+        None => log::debug!("No -c output given, skipping per-k-mer count table"),
     }
     log::debug!("Combining k-mer counts by allele...");
     let counts_by_allele = combine_counts_by_allele(index, &kmer_counts);

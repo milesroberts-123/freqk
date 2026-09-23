@@ -78,8 +78,12 @@ enum Commands {
         print_frequency: usize,
         #[arg(short, long, help = "name of output for counts by allele")]
         freq_output: String,
-        #[arg(short, long, help = "name of output for raw kmer counts")]
-        count_output: String,
+        #[arg(
+            short,
+            long,
+            help = "name of output for raw kmer counts (optional; if omitted, the per-k-mer count table is not written)"
+        )]
+        count_output: Option<String>,
         #[command(flatten)]
         verbosity: clap_verbosity_flag::Verbosity,
     },
@@ -182,7 +186,7 @@ fn main() {
             count_output,
             ..
         } => {
-            log::info!("Counting k-mers: INDEX: {}, READS: {:?}, NTHREADS: {}, PRINT_FREQUENCY: {}, FREQ OUTPUT: {}, COUNT OUTPUT: {}", index, reads, nthreads, print_frequency, freq_output, count_output);
+            log::info!("Counting k-mers: INDEX: {}, READS: {:?}, NTHREADS: {}, PRINT_FREQUENCY: {}, FREQ OUTPUT: {}, COUNT OUTPUT: {:?}", index, reads, nthreads, print_frequency, freq_output, count_output);
             common::ensure_readable(index);
             for reads_file in reads {
                 common::ensure_readable(reads_file);
@@ -193,7 +197,7 @@ fn main() {
                 *nthreads,
                 *print_frequency,
                 freq_output,
-                count_output,
+                count_output.as_deref(),
             );
         }
         Commands::VarDedup {
