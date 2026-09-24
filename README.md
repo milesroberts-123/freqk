@@ -126,7 +126,7 @@ Commands:
   call       Convert counts by allele into allele frequencies
   ref-dedup  Deduplicate index of reference k-mers
   filter     Filter index rows by allele-specific k-mer content
-  hetmers    Count het-mers
+  hetmers    Find het-mers in a k-mer count table (e.g. from kmc or jellyfish)
   help       Print this message or the help of the given subcommand(s)
 
 Options:
@@ -189,4 +189,59 @@ allele-specific k-mers:
 
 ```bash
 freqk filter -i ref_index.txt -o filtered_index.txt -k 3
+```
+
+### hetmers
+
+Find *het-mers*: pairs of k-mers whose "borders" (the k-mer with its central
+base removed) are identical, meaning the pair differs at exactly one base —
+a heterozygous SNV. hetmers discovers these sites **de novo** from k-mer
+counts alone, with no VCF or reference genome, so it is a parallel branch of
+the workflow rather than a stage in the index → count → call pipeline (which
+estimates frequencies at *known* variants).
+
+The input is a k-mer count table with two tab-separated columns (k-mer,
+count), produced by any k-mer counter such as [kmc](https://github.com/refresh-bio/KMC)
+or [jellyfish](https://github.com/gmarcais/Jellyfish) (or `freqk count -c`,
+which is already sorted as hetmers requires). Counts below the minimum are
+filtered out; the table must be lexicographically sorted by k-mer.
+
+For each hetmer (group of exactly `-l/--alleles` k-mers sharing one border),
+six output files are written (`<prefix>_*.csv`, all in ascending-hash order):
+`seqs` (comma-joined k-mers), `counts` (their counts), `hashes` (the border
+hash), `empirical_freqs` (minor-allele count fraction; `NA` when counts are
+unparseable or sum to zero), `bayes_states` (posterior mode of the minor
+k-mer count, given pool size, coverage, and the alpha/beta prior), and
+`bad_hetmers` (1 = total coverage above `sigma * sqrt(pool * coverage)`,
+suggesting paralogous sequence).
+
+```bash
+$ freqk hetmers -h
+Find het-mers in a k-mer count table (e.g. from kmc or jellyfish)
+
+Usage: freqk hetmers [OPTIONS] --inputs <INPUTS>... --outputs <OUTPUTS>... --minimums <MINIMUMS>... --coverages <COVERAGES>... --pools <POOLS>... --alphas <ALPHAS>... --betas <BETAS>... --sigmas <SIGMAS>...
+
+Options:
+  -i, --inputs <INPUTS>...        comma-separated list of k-mer count tables (two tab-separated columns: k-mer, count)
+  -o, --outputs <OUTPUTS>...      comma-separated list of output file prefixes
+  -m, --minimums <MINIMUMS>...    comma-separated list of minimum k-mer counts
+  -l, --alleles <ALLELES>         number of alleles in each hetmer [default: 2]
+  -c, --coverages <COVERAGES>...  comma-separated list of mean k-mer coverages
+  -p, --pools <POOLS>...          comma-separated list of pool sizes
+  -a, --alphas <ALPHAS>...        comma-separated list of alpha shape parameters
+  -b, --betas <BETAS>...          comma-separated list of beta shape parameters
+  -s, --sigmas <SIGMAS>...        comma-separated list of sigma thresholds
+  -v, --verbose...
+          Increase logging verbosity
+  -q, --quiet...
+          Decrease logging verbosity
+  -h, --help
+          Print help
+```
+
+Example: find het-mers in a k-mer count table from a diploid pool of 20
+samples at 50x mean coverage:
+
+```bash
+freqk hetmers -i kmer_counts.txt -o hetmers -m 2 -c 50 -p 20 -a 0.05 -b 0.05 -s 0.9
 ```

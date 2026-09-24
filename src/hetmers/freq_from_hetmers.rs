@@ -16,18 +16,23 @@ fn parse_count_pairs(count_pairs: &[String]) -> Vec<Option<(f64, f64)>> {
 }
 
 /// Compute empirical minor-allele frequencies from hetmer count pairs.
+/// The output is parallel to the input (and to seqs.csv/counts.csv): rows
+/// with unparseable counts or a zero total are written as NA instead of
+/// being dropped, so row i of every output file describes the same hetmer.
 pub fn counts_to_frequencies(count_pairs: &[String]) -> Vec<String> {
     log::info!("Calculating frequencies...");
     parse_count_pairs(count_pairs)
         .into_iter()
-        .filter_map(|pair| {
-            let (min_num, max_num) = pair?;
-            let sum = min_num + max_num;
-            if sum != 0.0 {
-                Some((min_num / sum).to_string())
-            } else {
-                None
+        .map(|pair| match pair {
+            Some((min_num, max_num)) => {
+                let sum = min_num + max_num;
+                if sum != 0.0 {
+                    (min_num / sum).to_string()
+                } else {
+                    "NA".to_string()
+                }
             }
+            None => "NA".to_string(),
         })
         .collect()
 }
@@ -76,7 +81,7 @@ pub fn posterior_min_kmer_count(
     c: usize,
     alpha: f64,
     beta: f64,
-) -> usize {
+) -> Result<usize, std::io::Error> {
     let mut likelihood_times_prior = Vec::new();
     let mut total_probability = 0.0;
     let max_minor_count = n / 2; // minor allele can't have frequency above 1/2 by definition
@@ -105,12 +110,22 @@ pub fn posterior_min_kmer_count(
         .enumerate()
         .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
         .map(|(idx, _)| idx)
-        .unwrap();
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "Cannot compute the Bayesian allele state for a hetmer with pool size {} (the minor-allele frequency grid is empty for pools smaller than 2)",
+                    n
+                ),
+            )
+        })?;
 
-    max_index + c
+    Ok(max_index + c)
 }
 
 /// Calculate the posterior distribution for allele count of each hetmer.
+/// The output is parallel to the input (and to seqs.csv/counts.csv): rows
+/// with unparseable counts are written as 0.
 pub fn counts_to_bayes_state(
     count_pairs: &[String],
     n: i32,
@@ -118,7 +133,7 @@ pub fn counts_to_bayes_state(
     c: usize,
     alpha: f64,
     beta: f64,
-) -> Vec<usize> {
+) -> Result<Vec<usize>, std::io::Error> {
     log::info!("Calculating posterior...");
     parse_count_pairs(count_pairs)
         .into_iter()
@@ -127,7 +142,7 @@ pub fn counts_to_bayes_state(
                 let z = x + max_num;
                 posterior_min_kmer_count(x, z, n, cov, c, alpha, beta)
             }
-            None => 0,
+            None => Ok(0),
         })
         .collect()
 }
@@ -153,6 +168,47 @@ mod unit_tests {
             "0.5".to_string(),
         ];
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn freqs_parallel_with_na_for_bad_pairs() {
+        // Malformed and zero-total pairs become NA in place; the output stays
+        // parallel to seqs.csv/counts.csv.
+        let count_pairs = vec![
+            "5,120".to_string(),
+            "garbage".to_string(),
+            "0,0".to_string(),
+            "1,3".to_string(),
+        ];
+        let result = counts_to_frequencies(&count_pairs);
+        assert_eq!(
+            result,
+            vec![
+                "0.04".to_string(),
+                "NA".to_string(),
+                "NA".to_string(),
+                "0.25".to_string()
+            ]
+        );
+        assert_eq!(result.len(), count_pairs.len());
+    }
+
+    #[test]
+    fn bayes_state_rejects_small_pool() {
+        // Pool < 2 has an empty minor-frequency grid; must error, not panic.
+        let count_pairs = vec!["5,120".to_string()];
+        let result = counts_to_bayes_state(&count_pairs, 1, 50.0, 2, 0.05, 0.05);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("pool size 1"));
+    }
+
+    #[test]
+    fn bayes_state_none_pairs_are_zero() {
+        let count_pairs = vec!["garbage".to_string(), "5,120".to_string()];
+        let result = counts_to_bayes_state(&count_pairs, 20, 50.0, 2, 0.05, 0.05).unwrap();
+        assert_eq!(result[0], 0);
+        assert!(result[1] > 0);
+        assert_eq!(result.len(), 2);
     }
 
     // helper function to test equality of floating point numbers

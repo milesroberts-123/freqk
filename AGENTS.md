@@ -50,9 +50,15 @@ target/debug/freqk call -i ref_index.txt -c counts_by_allele.txt -o calls.txt
   `index.rs` (build allele-specific k-mer index), `dedup.rs` (var-dedup across
   variants; ref-dedup vs reference), `count.rs` (k-mer counting over fastq with
   manual `nthreads` parallelism), `call.rs` (normalize counts → allele freqs),
-  `hetmers.rs` + `hetmers/freq_from_hetmers.rs`, `common.rs` (shared IO/parsing).
+  `filter.rs` (row-level index filtering), `hetmers.rs` +
+  `hetmers/freq_from_hetmers.rs`, `common.rs` (shared IO/parsing).
 - Formats: index is CSV with pipe-separated fields inside (alleles, k-mers,
   counts); `call` output is one line per variant, pipe-separated allele freqs.
+- `hetmers` is a de novo branch, NOT part of the index→count→call pipeline: it
+  finds heterozygous SNV pairs (identical k−1 borders) in any k-mer count table
+  (kmc/jellyfish/`count -c`), no VCF or reference needed. Its list args are
+  comma-separated like count's `-r`. Output files are parallel across the six
+  CSVs (`empirical_freqs` writes NA for unparseable/zero-sum pairs).
 
 ## Conventions / gotchas
 - Work happens on `dev`; changes reach `main` via merge PRs (matches git history).

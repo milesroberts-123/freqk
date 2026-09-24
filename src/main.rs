@@ -145,34 +145,34 @@ enum Commands {
         #[command(flatten)]
         verbosity: clap_verbosity_flag::Verbosity,
     },
-    /// Count het-mers
+    /// Find het-mers in a k-mer count table (e.g. from kmc or jellyfish)
     Hetmers {
         /// kmer count table file name
-        #[arg(short, long, num_args = 1.., value_delimiter = ' ', required = true)]
+        #[arg(short, long, help = "comma-separated list of k-mer count tables (two tab-separated columns: k-mer, count)", value_delimiter = ',', num_args = 1.., required = true)]
         inputs: Vec<String>,
         /// prefix for output files
-        #[arg(short, long, num_args = 1.., value_delimiter = ' ', required = true)]
+        #[arg(short, long, help = "comma-separated list of output file prefixes", value_delimiter = ',', num_args = 1.., required = true)]
         outputs: Vec<String>,
         /// minimum k-mer count
-        #[arg(short, long, num_args = 1.., value_delimiter = ' ', required = true)]
+        #[arg(short, long, help = "comma-separated list of minimum k-mer counts", value_delimiter = ',', num_args = 1.., required = true)]
         minimums: Vec<usize>,
         /// number of alleles in each hetmer
         #[arg(short = 'l', long, default_value_t = 2)]
         alleles: usize,
         /// mean k-mer coverage
-        #[arg(short, long, num_args = 1.., value_delimiter = ' ', required = true)]
+        #[arg(short, long, help = "comma-separated list of mean k-mer coverages", value_delimiter = ',', num_args = 1.., required = true)]
         coverages: Vec<f64>,
         /// pool size
-        #[arg(short, long, num_args = 1.., value_delimiter = ' ', required = true)]
+        #[arg(short, long, help = "comma-separated list of pool sizes", value_delimiter = ',', num_args = 1.., required = true)]
         pools: Vec<i32>,
         /// shape parameter for prior distribution
-        #[arg(short, long, num_args = 1.., value_delimiter = ' ', required = true)]
+        #[arg(short, long, help = "comma-separated list of alpha shape parameters", value_delimiter = ',', num_args = 1.., required = true)]
         alphas: Vec<f64>,
         /// shape parameter for prior distribution
-        #[arg(short, long, num_args = 1.., value_delimiter = ' ', required = true)]
+        #[arg(short, long, help = "comma-separated list of beta shape parameters", value_delimiter = ',', num_args = 1.., required = true)]
         betas: Vec<f64>,
         /// thresholds for determining if k-mer has abnormal copy number
-        #[arg(short, long, num_args = 1.., value_delimiter = ' ', required = true)]
+        #[arg(short, long, help = "comma-separated list of sigma thresholds", value_delimiter = ',', num_args = 1.., required = true)]
         sigmas: Vec<f64>,
         #[command(flatten)]
         verbosity: clap_verbosity_flag::Verbosity,
@@ -339,9 +339,12 @@ fn main() {
                     },
                 );
             for (input, output, minimum, coverage, pool, alpha, beta, sigma) in params {
-                hetmers::kmers_to_hetmers(
+                if let Err(e) = hetmers::kmers_to_hetmers(
                     input, output, *minimum, *alleles, *pool, *coverage, *alpha, *beta, *sigma,
-                );
+                ) {
+                    log::error!("hetmers failed for {}: {}", input, e);
+                    std::process::exit(1);
+                }
             }
         }
     }

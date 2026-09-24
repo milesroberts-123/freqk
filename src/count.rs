@@ -304,8 +304,8 @@ mod unit_tests {
 
     #[test]
     fn test_kmer_key_still_available_for_other_commands() {
-        // KmerKey remains used by dedup/hetmers; make sure string fallback
-        // keys still resolve distinctly.
+        // KmerKey (with the Str fallback for the "" pseudo-entry) is used by
+        // dedup; hetmers works on plain k-mer count tables instead.
         use crate::common::KmerKey;
         let a = KmerKey::from_kmer("ACGTACGTACGTACGTACGTACGTACGTACGT");
         let b = KmerKey::from_kmer("ACGTACGTACGTACGTACGTACGTACGTACGA");

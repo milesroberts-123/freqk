@@ -62,9 +62,12 @@
   bayes_states, empirical_freqs) are in ascending-hash order and deterministic
   across runs. load_kmers rejects empty k-mer strings and unreadable files
   with clear errors; hetmers inputs are pre-flighted with ensure_readable.
-  Remaining polish (separate to-dos): make load_kmers parse the whole table
-  before running input checks, unify hetmers CLI list style (space-separated)
-  with count (comma-separated), methods on structs.
+  Follow-up (0.23.1): CLI list args unified with count (comma-separated);
+  all panics/.expects replaced with Result errors that exit 1 (input checks
+  run after the whole table parses; empty-after-filter and pool < 2 have
+  clear errors instead of panics); empirical_freqs rows now parallel to
+  seqs/counts (NA for unparseable/zero-sum pairs); README documents the
+  de novo het-mers branch and its kmc/jellyfish-style input.
 
 - [ ] add q-mers?
 

@@ -8,8 +8,10 @@ use crate::common;
 mod freq_from_hetmers;
 
 /// Read a k-mer count table (two tab-separated columns) into (sequence, count)
-/// pairs. Unreadable files, unparseable counts, and empty k-mer strings are
-/// hard errors; lines with the wrong column count are skipped with a warning.
+/// pairs. The whole table is parsed before any format check runs, so format
+/// errors are reported against the full table. Unreadable files, unparseable
+/// counts, and empty k-mer strings are hard errors; lines with the wrong
+/// column count are skipped with a warning.
 fn load_kmers(input: &str, minimum: usize) -> Result<Vec<(String, usize)>, std::io::Error> {
     log::info!("Loading k-mer count file {}...", input);
     let file = File::open(input)?;
@@ -86,27 +88,60 @@ fn check_letters(seqs: &[String]) -> bool {
     result
 }
 
-/// Run all input checks, panicking on failure.
-fn all_checks(seqs: &[String]) {
+/// Run all input checks, returning an error naming the first offending k-mer
+/// on failure.
+fn all_checks(seqs: &[String]) -> Result<(), std::io::Error> {
     log::info!("Checking input format...");
     if !check_sort(seqs) {
-        panic!("Input k-mers are not lexicographically sorted");
+        // Find the first out-of-order pair for a helpful message.
+        let offender = seqs
+            .windows(2)
+            .find(|w| w[0] > w[1])
+            .map(|w| format!("'{}' before '{}'", w[0], w[1]))
+            .unwrap_or_else(|| "unknown position".to_string());
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "Input k-mers are not lexicographically sorted ({})",
+                offender
+            ),
+        ));
     }
 
     if !check_letters(seqs) {
-        panic!("Input k-mers contain characters other than ATGC")
+        let offender = seqs
+            .iter()
+            .find(|seq| !seq.chars().all(|c| matches!(c, 'A' | 'T' | 'G' | 'C')))
+            .cloned()
+            .unwrap_or_default();
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "Input k-mers contain characters other than ATGC ('{}')",
+                offender
+            ),
+        ));
     }
+
+    Ok(())
 }
 
 /// Remove the central base from each k-mer.
-fn extract_border(seqs: &[String]) -> Vec<String> {
+fn extract_border(seqs: &[String]) -> Result<Vec<String>, std::io::Error> {
+    if seqs.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "No k-mers retained after applying the minimum count filter",
+        ));
+    }
     let k = seqs[0].len();
     log::info!("k is {}", k);
     let k_half = k / 2;
 
-    seqs.iter()
+    Ok(seqs
+        .iter()
         .map(|s| format!("{}{}", &s[..k_half], &s[k_half + 1..]))
-        .collect()
+        .collect())
 }
 
 /// Reverse complement each sequence.
@@ -116,7 +151,7 @@ fn rev_comp(seqs: &[String]) -> Vec<String> {
 }
 
 /// Hash each sequence with SHA-256, keeping the first 8 bytes.
-fn hash_seqs(seqs: Vec<String>) -> Vec<u64> {
+fn hash_seqs(seqs: &[String]) -> Vec<u64> {
     log::debug!("Hashing...");
     let hash_fn = |s: &String| {
         let mut hasher = Sha256::new();
@@ -193,13 +228,18 @@ fn extract_hetmers(
 }
 
 /// Write a vector of strings to a file, one line per element.
-fn write_file(output: &[String], prefix: &str, suffix: &str) {
+fn write_file(output: &[String], prefix: &str, suffix: &str) -> std::io::Result<()> {
     log::info!("Saving results to {}_{}...", prefix, suffix);
-    let mut file = File::create(format!("{}_{}", prefix, suffix)).expect("Unable to create file");
-    writeln!(file, "{}", output.join("\n")).expect("Unable to write to file");
+    let mut file = File::create(format!("{}_{}", prefix, suffix))?;
+    if !output.is_empty() {
+        writeln!(file, "{}", output.join("\n"))?;
+    }
+    Ok(())
 }
 
 /// Find hetmers in a k-mer count table and write results to output files.
+/// Input is a table of k-mer counts from any counter (kmc, jellyfish, or
+/// `freqk count -c`), with two tab-separated columns: k-mer, count.
 #[allow(clippy::too_many_arguments)]
 pub fn kmers_to_hetmers(
     input: &str,
@@ -211,27 +251,24 @@ pub fn kmers_to_hetmers(
     alpha: f64,
     beta: f64,
     sigma: f64,
-) {
-    // load k-mers
-    let kmers = load_kmers(input, minimum).unwrap_or_else(|e| {
-        log::error!("Loading hetmers input failed: {}", e);
-        std::process::exit(1);
-    });
+) -> Result<(), std::io::Error> {
+    // load k-mers (the whole table is parsed before format checks run)
+    let kmers = load_kmers(input, minimum)?;
     let seqs: Vec<String> = kmers.iter().map(|(seq, _)| seq.clone()).collect();
     let counts: Vec<usize> = kmers.iter().map(|(_, count)| *count).collect();
 
     // input checks
-    all_checks(&seqs);
+    all_checks(&seqs)?;
 
     // remove central base from each k-mer
-    let borders = extract_border(&seqs);
+    let borders = extract_border(&seqs)?;
 
     // reverse complement borders
     let revborders = rev_comp(&borders);
 
     // get hash of borders
-    let hashbord = hash_seqs(borders);
-    let hashrevbord = hash_seqs(revborders);
+    let hashbord = hash_seqs(&borders);
+    let hashrevbord = hash_seqs(&revborders);
 
     // compare forward and reverse hash and take the min
     let min_hashes = min_hash(hashbord, hashrevbord);
@@ -250,15 +287,15 @@ pub fn kmers_to_hetmers(
 
     // bayesian allele states
     let bayes_states =
-        freq_from_hetmers::counts_to_bayes_state(&hetmers.1, pool, coverage, minimum, alpha, beta);
+        freq_from_hetmers::counts_to_bayes_state(&hetmers.1, pool, coverage, minimum, alpha, beta)?;
 
     // check for hetmers with weirdly high coverage
     let check_these_hetmers =
         freq_from_hetmers::high_cov_hetmers(&hetmers.1, sigma, pool, coverage);
 
     // write output files
-    write_file(&hetmers.0, output, "seqs.csv");
-    write_file(&hetmers.1, output, "counts.csv");
+    write_file(&hetmers.0, output, "seqs.csv")?;
+    write_file(&hetmers.1, output, "counts.csv")?;
     write_file(
         &hetmers
             .2
@@ -267,7 +304,7 @@ pub fn kmers_to_hetmers(
             .collect::<Vec<String>>(),
         output,
         "hashes.csv",
-    );
+    )?;
     write_file(
         &bayes_states
             .into_iter()
@@ -275,9 +312,10 @@ pub fn kmers_to_hetmers(
             .collect::<Vec<String>>(),
         output,
         "bayes_states.csv",
-    );
-    write_file(&empirical_frequencies, output, "empirical_freqs.csv");
-    write_file(&check_these_hetmers, output, "bad_hetmers.csv");
+    )?;
+    write_file(&empirical_frequencies, output, "empirical_freqs.csv")?;
+    write_file(&check_these_hetmers, output, "bad_hetmers.csv")?;
+    Ok(())
 }
 
 // test functions
@@ -293,7 +331,7 @@ mod unit_tests {
             "TTGAT".to_string(),
             "GGATA".to_string(),
         ];
-        let result = extract_border(&test_vec);
+        let result = extract_border(&test_vec).unwrap();
         let expected = vec!["ATCA".to_string(), "TTAT".to_string(), "GGTA".to_string()];
         assert_eq!(result, expected);
     }
@@ -305,13 +343,23 @@ mod unit_tests {
             "TTGATC".to_string(),
             "GGATAA".to_string(),
         ];
-        let result = extract_border(&test_vec);
+        let result = extract_border(&test_vec).unwrap();
         let expected = vec![
             "ATGAT".to_string(),
             "TTGTC".to_string(),
             "GGAAA".to_string(),
         ];
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn empty_input_border_is_err() {
+        let result = extract_border(&[]);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("No k-mers retained"));
     }
 
     #[test]
@@ -487,5 +535,39 @@ mod unit_tests {
         let expected: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
 
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn all_checks_accepts_sorted_atgc() {
+        let seqs = vec!["AAAAA".to_string(), "CCCCC".to_string()];
+        assert!(all_checks(&seqs).is_ok());
+    }
+
+    #[test]
+    fn all_checks_rejects_unsorted_with_offender() {
+        let seqs = vec!["GGGGG".to_string(), "CCCCC".to_string()];
+        let result = all_checks(&seqs);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("'GGGGG' before 'CCCCC'"));
+    }
+
+    #[test]
+    fn all_checks_rejects_non_atgc_with_offender() {
+        let seqs = vec!["AAAAN".to_string()];
+        let result = all_checks(&seqs);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("AAAAN"));
+    }
+
+    #[test]
+    fn write_file_empty_vec_creates_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out");
+        write_file(&[], path.to_str().unwrap(), "test.csv").unwrap();
+        let content = std::fs::read_to_string(dir.path().join("out_test.csv")).unwrap();
+        assert_eq!(content, "");
     }
 }
