@@ -2,7 +2,7 @@
 
 freqk: Rust CLI estimating allele frequencies in pool-seq data from allele-specific
 k-mer counts. Single binary, clap-derive subcommands: index, var-dedup, ref-dedup,
-count, call, hetmers.
+count, call, filter, hetmers.
 
 ## Commands
 - `cargo build` — debug binary at `target/debug/freqk`

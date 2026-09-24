@@ -4,6 +4,7 @@ mod call;
 mod common;
 mod count;
 mod dedup;
+mod filter;
 mod hetmers;
 mod index;
 
@@ -118,6 +119,29 @@ enum Commands {
             help = "Drop index rows unless at least this many alleles have >= 1 allele-specific k-mer (0 keeps all rows)"
         )]
         min_alleles: usize,
+        #[command(flatten)]
+        verbosity: clap_verbosity_flag::Verbosity,
+    },
+    /// Filter index rows by allele-specific k-mer content
+    Filter {
+        #[arg(short, long, help = "path to index file")]
+        index: String,
+        #[arg(short, long, help = "path to filtered index file")]
+        output: String,
+        #[arg(
+            short = 'm',
+            long,
+            default_value_t = 0,
+            help = "Keep index rows only if at least this many alleles have >= 1 allele-specific k-mer (0 keeps all rows)"
+        )]
+        min_alleles: usize,
+        #[arg(
+            short = 'k',
+            long,
+            default_value_t = 0,
+            help = "Keep index rows only if every allele has >= this many allele-specific k-mers (0 keeps all rows)"
+        )]
+        min_kmers_per_allele: usize,
         #[command(flatten)]
         verbosity: clap_verbosity_flag::Verbosity,
     },
@@ -260,6 +284,27 @@ fn main() {
             common::ensure_readable(counts);
             if let Err(e) = call::call_from_counts(index, counts, output) {
                 log::error!("call failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Filter {
+            index,
+            output,
+            min_alleles,
+            min_kmers_per_allele,
+            ..
+        } => {
+            log::info!(
+                "Filtering index: INDEX: {} OUTPUT: {} MIN_ALLELES: {} MIN_KMERS_PER_ALLELE: {}",
+                index,
+                output,
+                min_alleles,
+                min_kmers_per_allele
+            );
+            common::ensure_readable(index);
+            if let Err(e) = filter::filter_index(index, output, *min_alleles, *min_kmers_per_allele)
+            {
+                log::error!("filter failed: {}", e);
                 std::process::exit(1);
             }
         }

@@ -125,6 +125,7 @@ Commands:
   count      Count k-mers by allele
   call       Convert counts by allele into allele frequencies
   ref-dedup  Deduplicate index of reference k-mers
+  filter     Filter index rows by allele-specific k-mer content
   hetmers    Count het-mers
   help       Print this message or the help of the given subcommand(s)
 
@@ -151,4 +152,41 @@ Options:
   -v, --verbose...       Increase logging verbosity
   -q, --quiet...         Decrease logging verbosity
   -h, --help             Print help
+```
+
+### filter
+
+Filter index rows by allele-specific k-mer content. Works on any index
+(`var-dedup` or `ref-dedup` output), so thresholds can be tuned without
+re-running the expensive `index` step. Rows are dropped whole: a frequency
+estimate is only meaningful when all alleles are tagged.
+
+```bash
+$ freqk filter -h
+Filter index rows by allele-specific k-mer content
+
+Usage: freqk filter [OPTIONS] --index <INDEX> --output <OUTPUT>
+
+Options:
+  -i, --index <INDEX>
+          path to index file
+  -o, --output <OUTPUT>
+          path to filtered index file
+  -m, --min-alleles <MIN_ALLELES>
+          Keep index rows only if at least this many alleles have >= 1 allele-specific k-mer (0 keeps all rows) [default: 0]
+  -k, --min-kmers-per-allele <MIN_KMERS_PER_ALLELE>
+          Keep index rows only if every allele has >= this many allele-specific k-mers (0 keeps all rows) [default: 0]
+  -v, --verbose...
+          Increase logging verbosity
+  -q, --quiet...
+          Decrease logging verbosity
+  -h, --help
+          Print help
+```
+
+Example: keep variants where both alleles are tagged by at least 3
+allele-specific k-mers:
+
+```bash
+freqk filter -i ref_index.txt -o filtered_index.txt -k 3
 ```
