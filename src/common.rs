@@ -4,6 +4,7 @@ use std::io;
 use std::io::BufRead;
 use std::io::BufReader;
 use std::io::Write;
+use std::sync::{Arc, Mutex};
 
 /// Fetch a subsequence from a samtools-faidx-indexed FASTA and return it as an
 /// uppercase ATGC/N string. `start` is 0-based inclusive, `stop` is 0-based
@@ -179,6 +180,7 @@ impl KmerKey {
     }
 
     /// Convert back to the k-mer string, given k for packed keys.
+    #[cfg(test)]
     pub fn to_kmer(&self, k: usize) -> String {
         match self {
             KmerKey::Packed(packed) => unpack_kmer(*packed, k),
@@ -253,6 +255,80 @@ pub fn read_index_field(index: &str, column: usize) -> Result<Vec<Vec<String>>, 
         result.push(field_vec);
     }
     Ok(result)
+}
+
+/// Number of shards in a [`ShardedCounts`] map. Chosen so that a few worker
+/// threads almost never contend on the same shard.
+const N_SHARDS: usize = 256;
+
+/// Multiplicative-hash constant for shard selection (golden-ratio style).
+const SHARD_HASH: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// Shard of the map that holds the key. A multiply-shift hash spreads the
+/// high bits of the packed k-mer (which carry the low bases) over all shards,
+/// so consecutive k-mers and low-entropy reads land on different shards.
+pub fn shard_of(packed: u64) -> usize {
+    ((packed.wrapping_mul(SHARD_HASH) >> 56) as usize) & (N_SHARDS - 1)
+}
+
+/// K-mer counts shared across worker threads: one mutex-guarded map per
+/// shard. Counting increments the shared tables directly, so there are no
+/// per-thread maps and no merge step, and memory is one table, not one per
+/// thread. Keys are packed ATGC k-mers of length <= 31 (2 bits per base);
+/// numeric key order equals lexicographic k-mer order.
+pub type ShardedCounts = Vec<Mutex<HashMap<u64, usize>>>;
+
+/// Create an empty sharded count map.
+pub fn new_sharded_counts() -> Arc<ShardedCounts> {
+    Arc::new((0..N_SHARDS).map(|_| Mutex::new(HashMap::new())).collect())
+}
+
+/// Pre-fill every shard with all index k-mers at count 0, so membership is
+/// the lookup itself. Empty index lines and the empty-allele pseudo-entry ""
+/// (which packs to None) are skipped.
+pub fn prefill_from_index(index: &str, sharded: &ShardedCounts) -> Result<(), io::Error> {
+    let file = File::open(index)?;
+    let reader = BufReader::new(file);
+    for line_result in reader.lines() {
+        let line = line_result?;
+        let fields: Vec<&str> = line.split(',').collect();
+        if fields.len() < 8 {
+            continue;
+        }
+        for kmer in fields[7].split('|').flat_map(|s| s.split(';')) {
+            if let Some(packed) = pack_kmer(kmer) {
+                let mut shard = sharded[shard_of(packed)].lock().unwrap();
+                shard.insert(packed, 0);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Increment the count of a packed k-mer by 1 if it is in the map
+/// (pre-filled from the index); unknown keys are ignored. The get-then-add
+/// costs one extra probe but keeps worker threads from ever inserting keys,
+/// so the map stays at index size.
+pub fn increment(sharded: &ShardedCounts, packed: u64) {
+    let mut shard = sharded[shard_of(packed)].lock().unwrap();
+    if shard.contains_key(&packed) {
+        *shard.get_mut(&packed).unwrap() += 1;
+    }
+}
+
+/// Total number of distinct k-mers with a count > 0.
+pub fn sharded_len(sharded: &ShardedCounts) -> usize {
+    sharded
+        .iter()
+        .map(|shard| {
+            shard
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|&(_, &c)| c > 0)
+                .count()
+        })
+        .sum()
 }
 
 /// Write a Vec<String> to a file, one string per line.
