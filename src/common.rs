@@ -243,16 +243,37 @@ pub fn get_canonical_kmers_packed(sequence: &str, k: usize) -> Vec<u64> {
 }
 
 /// Read one field of an index file, splitting on `|` within each line.
+/// Lines with too few comma-separated fields are skipped with a warning
+/// instead of panicking. Returns an error if no line in the file yields the
+/// requested column, which means the file is not a freqk index.
 pub fn read_index_field(index: &str, column: usize) -> Result<Vec<Vec<String>>, io::Error> {
     let file = File::open(index)?;
     let reader = BufReader::new(file);
     let mut result = Vec::new();
-    for line_result in reader.lines() {
+    for (line_number, line_result) in reader.lines().enumerate() {
         let line = line_result?;
         let fields: Vec<&str> = line.split(',').collect();
+        if fields.len() < column + 1 {
+            log::warn!(
+                "Skipping malformed index line {} (expected at least {} comma-separated fields): {}",
+                line_number + 1,
+                column + 1,
+                line
+            );
+            continue;
+        }
         let field = fields[column];
         let field_vec: Vec<String> = field.split('|').map(|s| s.to_owned()).collect();
         result.push(field_vec);
+    }
+    if result.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "No line in '{}' has a field at column {} (0-based); is it a freqk index file?",
+                index, column
+            ),
+        ));
     }
     Ok(result)
 }
