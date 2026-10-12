@@ -1,14 +1,16 @@
 //! End-to-end pipeline test: runs the README quick-start commands against the
 //! tracked test fixtures and asserts the canonical outputs, locking the
-//! `calls.txt` md5 = 27c8de92b97963229c7cc8e4c3569ad6 contract.
+//! `calls.txt` md5 = ea5a558fc94766653a81d604755f04e4 contract.
 //!
 //! Skipped automatically when the gzip fixtures are absent (e.g. a fresh clone
 //! without the force-added fastq files).
 
 use std::process::Command;
 
-const CALLS_MD5: &str = "27c8de92b97963229c7cc8e4c3569ad6";
-const COUNTS_BY_KMER_MD5: &str = "0b4f313da484d62dd422e962ff2d7463";
+const CALLS_MD5: &str = "ea5a558fc94766653a81d604755f04e4";
+const COUNTS_BY_KMER_MD5: &str = "241b92bec1473f440842b9f129d5451e";
+const COUNTS_BY_ALLELE_MD5: &str = "838cc3cb51e77ca638473058d4a0eaaa";
+const REF_INDEX_MD5: &str = "481363f2d4720b2326bbd5715cb7f410";
 
 fn fixture(path: &str) -> String {
     format!("{}/tests/{}", env!("CARGO_MANIFEST_DIR"), path)
@@ -92,8 +94,6 @@ fn quick_start_pipeline_produces_canonical_output() {
         ref_index.to_str().unwrap(),
         "-f",
         &fixture("test.fasta"),
-        "--vcf",
-        &fixture("test.vcf.gz"),
     ]);
     run(&[
         "count",
@@ -124,6 +124,16 @@ fn quick_start_pipeline_produces_canonical_output() {
         calls.to_str().unwrap(),
     ]);
 
+    assert_eq!(
+        md5(&ref_index),
+        REF_INDEX_MD5,
+        "ref_index.txt changed; check whether the difference is intended and update the contract md5"
+    );
+    assert_eq!(
+        md5(&counts_by_allele),
+        COUNTS_BY_ALLELE_MD5,
+        "counts_by_allele.txt changed; check whether the difference is intended and update the contract md5"
+    );
     assert_eq!(
         md5(&calls),
         CALLS_MD5,

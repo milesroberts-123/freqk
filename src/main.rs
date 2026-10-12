@@ -108,11 +108,6 @@ enum Commands {
         #[arg(short, long, help = "fasta file of reference genome")]
         fasta: String,
         #[arg(
-            long,
-            help = "vcf file of variations between reference and other genomes"
-        )]
-        vcf: String,
-        #[arg(
             short = 'm',
             long,
             default_value_t = 0,
@@ -246,24 +241,20 @@ fn main() {
             index,
             output,
             fasta,
-            vcf,
             min_alleles,
             ..
         } => {
             log::info!(
-                "Deduplicating index of reference k-mers: INDEX: {} OUTPUT: {} FASTA: {} VCF: {} MIN_ALLELES: {}",
+                "Deduplicating index of reference k-mers: INDEX: {} OUTPUT: {} FASTA: {} MIN_ALLELES: {}",
                 index,
                 output,
                 fasta,
-                vcf,
                 min_alleles
             );
             common::ensure_readable(index);
             common::ensure_readable(fasta);
             common::ensure_readable(&format!("{}.fai", fasta));
-            common::ensure_readable(vcf);
-            let ref_hash = dedup::reference_hashset(index, fasta, vcf);
-            if let Err(e) = dedup::remove_ref_kmers(index, output, ref_hash, *min_alleles) {
+            if let Err(e) = dedup::ref_dedup(index, fasta, output, *min_alleles) {
                 log::error!("ref-dedup failed: {}", e);
                 std::process::exit(1);
             }

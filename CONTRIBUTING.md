@@ -40,8 +40,24 @@
 
 - [x] stream ref-dedup in a single pass (like var-dedup): remove_ref_kmers no
   longer loads the whole index via read_index_kmers; each line is parsed,
-  filtered against the reference hashset, and written immediately. RSS is
+  filtered against the reference k-mer counts, and written immediately. RSS is
   flat (~250 MB) from 340 to 100k variants; output byte-identical.
+
+- [x] ref-dedup semantics: replaced the VCF-window scan (reference_hashset with
+  covered/skip/tail bookkeeping) with a reference k-mer occurrence count and
+  per-allele thresholds: every index k-mer spans its variant, so a REF-allele
+  k-mer always occurs exactly once at its own variant (kept while count <= 1:
+  any excess is a stray) while an ALT-allele k-mer never matches at its own
+  variant (dropped on any occurrence). Equivalent to "drop k-mers occurring
+  outside their own variant's locus" with no window arithmetic; also removes
+  the over-drop of legit REF k-mers whose variants ref-dedup used to skip
+  mid-stream (49 on the fixture) and drops ALT single-strays the window scan
+  would hide in another variant's window. ref-dedup no longer takes --vcf.
+  Known approximation (both need a duplicated k-mer within one ~60 bp window,
+  vanishingly rare): a REF k-mer duplicated wholly within its own window is
+  dropped; an ALT k-mer with an extra in-window occurrence is dropped though
+  the window scan would have kept it. Contracts re-baselined (they equal the
+  pre-tail-fix values, confirming those fixes' extra drops were over-drops).
 
 - [x] add unit tests
 

@@ -1,23 +1,9 @@
-use rust_htslib::bcf::Read;
-use rust_htslib::bcf::Reader;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, prelude::*, BufReader};
 use std::io::{BufWriter, Write};
 
 use crate::common;
-
-/// Get the contig name of a VCF record via its own header, without the
-/// `bio-types` `AbstractLocus` trait.
-fn record_contig(record: &rust_htslib::bcf::Record) -> &str {
-    std::str::from_utf8(
-        record
-            .header()
-            .rid2name(record.rid().expect("rid not set"))
-            .expect("unable to find rid in header"),
-    )
-    .expect("unable to interpret contig name as UTF-8")
-}
 
 /// Pack a canonical ATGC k-mer into an integer (2 bits per base) for cheap
 /// hashing, and key for counting k-mers in a hash map: packed `u64` for
@@ -35,186 +21,63 @@ fn kmers_from_line(line: &str) -> Vec<&str> {
     fields[7].split('|').flat_map(|s| s.split(';')).collect()
 }
 
-/// Build a hashset of all k-mers in non-variable reference regions.
-/// Fetch a reference region and insert its canonical k-mers of length `k`
-/// into `ref_kmers_hashset`, returning the scanned interval [start, stop)
-/// (0-based, stop exclusive) for coverage tracking.
-fn scan_region(
-    faidx: &rust_htslib::faidx::Reader,
-    chrom: &str,
-    start: i64,
-    stop: i64,
-    k: i64,
-    ref_kmers_hashset: &mut HashSet<String>,
-) {
-    if start >= stop {
-        log::debug!("Skipping empty region {}:{}-{}", chrom, start, stop);
-        return;
-    }
-    log::debug!("Scanning reference region {}:{}-{}", chrom, start, stop);
-    let seq_string = match common::fetch_fasta(
-        faidx,
-        chrom,
-        start.try_into().expect("Negative region start"),
-        stop.try_into().expect("Negative region stop"),
-    ) {
-        Ok(seq) => seq,
-        Err(e) => {
-            log::error!("Fetching {}:{}-{} failed: {}", chrom, start, stop, e);
-            std::process::exit(1);
+/// Count occurrences of every canonical reference k-mer, over all
+/// chromosomes of the reference genome.
+///
+/// One streaming pass: each chromosome is fetched in full and its canonical
+/// k-mers of length `k` are counted (k-mers overlapping non-ATGC bases are
+/// skipped, as everywhere else). The VCF plays no part: ref-dedup decides
+/// from reference occurrence counts alone, using the per-allele thresholds
+/// documented on [`ref_dedup`].
+pub fn ref_counts(fasta_path: &str, k: i64) -> Result<HashMap<String, u32>, io::Error> {
+    log::info!("Counting canonical reference k-mers...");
+    let faidx = rust_htslib::faidx::Reader::from_path(fasta_path)
+        .map_err(|e| io::Error::other(format!("Error opening FASTA index: {}", e)))?;
+    let chrom_lengths = common::read_fai(fasta_path)
+        .map_err(|e| io::Error::other(format!("Error reading chromosome lengths: {}", e)))?;
+    let mut counts: HashMap<String, u32> = HashMap::new();
+    for (chrom, length) in chrom_lengths.iter() {
+        log::debug!("Counting k-mers of CHROM: {} (length {})", chrom, length);
+        let seq = common::fetch_fasta(&faidx, chrom, 0, *length as u64)
+            .map_err(|e| io::Error::other(format!("Fetching {} failed: {}", chrom, e)))?;
+        for ref_kmer in common::get_canonical_kmers(&seq, k.max(0) as usize) {
+            *counts.entry(ref_kmer).or_insert(0) += 1;
         }
-    };
-    let ref_kmers: Vec<String> = common::get_canonical_kmers(&seq_string, k as usize);
-    for ref_kmer in ref_kmers {
-        ref_kmers_hashset.insert(ref_kmer);
     }
+    log::info!(
+        "{} unique canonical reference k-mers, of which {} occur more than once",
+        counts.len(),
+        counts.values().filter(|&&c| c > 1).count()
+    );
+    Ok(counts)
 }
 
-/// Build a hashset of all k-mers in non-variable reference regions.
-///
-/// The reference is scanned between variants (everything except the k flanks
-/// around each variant), the tail after the last variant of each chromosome,
-/// and chromosomes that have no variants at all, so that ref-dedup removes
-/// index k-mers that exist anywhere in the reference genome.
-pub fn reference_hashset(index: &str, fasta_path: &str, vcf_path: &str) -> HashSet<String> {
-    log::info!("Reading k-mer length from index...");
-    let k = common::k_from_index(index).expect("Error reading k-mer length from index.");
+/// Run ref-dedup end to end: count reference k-mer occurrences, then rewrite
+/// the index dropping k-mers that occur outside their own variant's locus
+/// (see [`remove_ref_kmers`]).
+pub fn ref_dedup(
+    index: &str,
+    fasta_path: &str,
+    output: &str,
+    min_alleles: usize,
+) -> Result<(), io::Error> {
+    let k = common::k_from_index(index)?;
     log::info!("k is: {:?}", k);
-    log::info!("Build hashset of reference k-mers...");
-    let mut vcf_reader = Reader::from_path(vcf_path).expect("Error opening file.");
-    let faidx =
-        rust_htslib::faidx::Reader::from_path(fasta_path).expect("Error opening FASTA index.");
-    let chrom_lengths = common::read_fai(fasta_path);
-    log::info!("Chromosome lengths:");
-    log::info!("{:?}", chrom_lengths);
-    // Exclusive end (0-based) of the reference region already scanned on each
-    // chromosome; 0 means nothing scanned yet.
-    let mut covered: HashMap<String, i64> = HashMap::new();
-    let mut ref_kmers_hashset = HashSet::new();
-    let mut vcf_iterator = vcf_reader.records().peekable();
-    while let Some(record_result) = vcf_iterator.next() {
-        let record = record_result.expect("Failure reading record");
-        let pos = record.pos() - 1;
-        let chrom = record_contig(&record);
-        let chrom_end = match chrom_lengths
-            .as_ref()
-            .expect("Error reading chromosome lengths")
-            .get(chrom)
-        {
-            Some(chrom_end) => *chrom_end,
-            None => {
-                log::error!(
-                    "Chromosome {} from the VCF is not in the FASTA index (.fai); exiting",
-                    chrom
-                );
-                std::process::exit(1);
-            }
-        };
-        let start = covered.get(chrom).cloned().unwrap_or(0);
-        let end = pos - k;
-        log::debug!("Processing record CHROM: {} POS: {}", chrom, pos);
-        log::debug!("Current region start: {}", start);
-        log::debug!("Extracting allele sequences from VCF...");
-        let mut alleles = String::new();
-        for allele in record.alleles() {
-            for c in allele {
-                alleles.push(char::from(*c))
-            }
-            alleles.push(' ')
-        }
-        let alleles_list: Vec<&str> = alleles.split_whitespace().collect();
-        log::debug!("Alleles: {:?}", alleles_list);
-        let ref_allele_len = alleles_list[0].len() as i64;
-        log::debug!("Reference allele length: {}", ref_allele_len);
-        if pos <= 1 {
-            log::warn!("Skipping current variant (CHROM: {} POS: {}) because its at the beginning of the chromosome", chrom, pos);
-            continue;
-        }
-        if (pos - start) < k {
-            log::warn!(
-                "Current variant (CHROM: {} POS: {}) within k bp of region start ({}), so skipping",
-                chrom,
-                pos,
-                start
-            );
-            continue;
-        }
-        if let Some(next_ref) = vcf_iterator.peek() {
-            let next_result = next_ref.as_ref().unwrap();
-            let pos_next = next_result.pos() - 1;
-            let chrom_next = record_contig(next_result);
-            log::debug!("Next record is CHROM: {} POS: {}", chrom_next, pos_next);
-            if chrom != chrom_next {
-                log::info!(
-                    "Chromosome boundry reached between CHROM: {} POS: {} and CHROM: {} POS: {}",
-                    chrom,
-                    pos,
-                    chrom_next,
-                    pos_next
-                );
-                // Scan the region before the variant, then the tail from k
-                // bases after the variant to the end of the chromosome.
-                scan_region(&faidx, chrom, start, end, k, &mut ref_kmers_hashset);
-                let tail_start = pos + k + (ref_allele_len - 1);
-                scan_region(
-                    &faidx,
-                    chrom,
-                    tail_start,
-                    chrom_end,
-                    k,
-                    &mut ref_kmers_hashset,
-                );
-                covered.insert(chrom.to_string(), chrom_end);
-            } else {
-                scan_region(&faidx, chrom, start, end, k, &mut ref_kmers_hashset);
-                let new_start = pos + k + (ref_allele_len - 1);
-                covered.insert(chrom.to_string(), new_start);
-            }
-        } else {
-            log::debug!("No next record, so end of VCF reached. Grab remainder of chromosome");
-            scan_region(&faidx, chrom, start, end, k, &mut ref_kmers_hashset);
-            let tail_start = pos + k + (ref_allele_len - 1);
-            scan_region(
-                &faidx,
-                chrom,
-                tail_start,
-                chrom_end,
-                k,
-                &mut ref_kmers_hashset,
-            );
-            covered.insert(chrom.to_string(), chrom_end);
-        }
+    let counts = ref_counts(fasta_path, k)?;
+    remove_ref_kmers(index, output, &counts, min_alleles)
+}
+
+/// Maximum reference occurrences a kept k-mer may have, given its allele
+/// position within its index row: the REF allele (group 0) is allowed one
+/// occurrence, its own variant's locus; an ALT-allele k-mer can never match
+/// at its own variant (its allele base differs from the reference base
+/// there), so every reference occurrence is a stray and must be dropped.
+fn max_kept_occurrences(group_index: usize) -> u32 {
+    if group_index == 0 {
+        1
+    } else {
+        0
     }
-    // Scan everything not yet covered: chromosome tails after skipped
-    // variants, and chromosomes without any variants at all.
-    let chrom_lengths = chrom_lengths.expect("Error unpacking chromosome lengths");
-    for (chrom, chrom_end) in chrom_lengths.iter() {
-        let scanned_to = covered.get(chrom).cloned().unwrap_or(0);
-        if scanned_to < *chrom_end {
-            if covered.contains_key(chrom) {
-                log::info!(
-                    "Scanning uncovered tail of CHROM: {} from {} to {}",
-                    chrom,
-                    scanned_to,
-                    chrom_end
-                );
-            } else {
-                log::warn!(
-                    "CHROM: {} has no variants in the VCF; scanning it fully",
-                    chrom
-                );
-            }
-            scan_region(
-                &faidx,
-                chrom,
-                scanned_to,
-                *chrom_end,
-                k,
-                &mut ref_kmers_hashset,
-            );
-        }
-    }
-    ref_kmers_hashset
 }
 
 /// Count the alleles of a deduplicated variant that have at least one
@@ -228,18 +91,24 @@ fn count_alleles_with_kmers<S: AsRef<str>>(dedup_kmers: &[Vec<S>]) -> usize {
 
 /// Remove k-mers found in the reference from an index and write a new index.
 ///
+/// DROP RULE: every index k-mer spans its variant, so a REF-allele k-mer
+/// always occurs exactly once in the reference — at its own variant — while
+/// an ALT-allele k-mer never does. A k-mer therefore has an occurrence
+/// outside its own variant's locus iff its reference count exceeds its
+/// allele's threshold (REF: 1, ALT: 0); such k-mers are dropped.
+///
 /// Streams the index in a single pass instead of loading it into memory: each
-/// line is parsed, its k-mers filtered against the reference hashset, and the
+/// line is parsed, its k-mers filtered against the reference counts, and the
 /// line rewritten immediately. Memory is proportional to one index line, not
 /// index size. Rows are dropped entirely when fewer than `min_alleles` alleles
 /// retain at least one k-mer (0 keeps every row).
 pub fn remove_ref_kmers(
     index: &str,
     output: &str,
-    ref_hashset: HashSet<String>,
+    ref_counts: &HashMap<String, u32>,
     min_alleles: usize,
 ) -> Result<(), io::Error> {
-    log::info!("Writing new index, removing k-mers found in non-variable sequences...");
+    log::info!("Writing new index, removing k-mers with excess reference occurrences...");
     let mut buffered_file = BufWriter::new(File::create(output)?);
     let file = File::open(index)?;
     let reader = BufReader::new(file);
@@ -263,10 +132,15 @@ pub fn remove_ref_kmers(
             .collect();
         let dedup_kmers: Vec<Vec<&str>> = kmers_by_allele
             .iter()
-            .map(|inner_vec| {
+            .enumerate()
+            .map(|(group_index, inner_vec)| {
+                let max_kept = max_kept_occurrences(group_index);
                 inner_vec
                     .iter()
-                    .filter(|s| !ref_hashset.contains(**s))
+                    .filter(|s| match ref_counts.get(**s) {
+                        None => true,
+                        Some(&count) => count <= max_kept,
+                    })
                     .cloned()
                     .collect()
             })
@@ -579,9 +453,11 @@ mod unit_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let index_path = dir.path().join("index.txt");
         let output_path = dir.path().join("dedup.txt");
-        // Variant 1: AAA in allele 0 is a reference k-mer -> removed, allele 0
-        // becomes empty; allele 1 (TTT) survives.
-        // Variant 2: both alleles are reference k-mers -> both empty.
+        // Variant row 1: REF allele k-mer AAA occurs twice in the reference —
+        // one occurrence is its own locus, so a second one is a stray ->
+        // dropped; TTT never occurs -> kept. Row 2: GGG occurs once (its own
+        // locus) -> kept for the REF allele; CCC occurs twice -> dropped for
+        // the ALT allele.
         std::fs::write(
             &index_path,
             concat!(
@@ -590,47 +466,117 @@ mod unit_tests {
             ),
         )
         .expect("write index");
-        let mut ref_hashset = HashSet::new();
-        ref_hashset.insert("AAA".to_string());
-        ref_hashset.insert("GGG".to_string());
-        ref_hashset.insert("CCC".to_string());
+        let mut ref_counts = HashMap::new();
+        ref_counts.insert("AAA".to_string(), 2);
+        ref_counts.insert("GGG".to_string(), 1);
+        ref_counts.insert("CCC".to_string(), 2);
 
         // min_alleles = 0 keeps all rows.
         remove_ref_kmers(
             index_path.to_str().expect("path"),
             output_path.to_str().expect("path"),
-            ref_hashset.clone(),
+            &ref_counts,
             0,
         )
         .expect("dedup");
         let result = std::fs::read_to_string(&output_path).expect("read output");
         let expected = concat!(
             "0,1,100,AAAA,REF|ALT,AAAA|ACAA,0|1,|TTT\n",
-            "1,1,200,CCCC,REF|ALT,CCCC|CCGG,0|0,|\n",
+            "1,1,200,CCCC,REF|ALT,CCCC|CCGG,1|0,GGG|\n",
         );
         assert_eq!(result, expected);
 
-        // min_alleles = 1 drops variant 2 (no alleles left with k-mers).
+        // min_alleles = 1 keeps both rows (each retains one allele).
         remove_ref_kmers(
             index_path.to_str().expect("path"),
             output_path.to_str().expect("path"),
-            ref_hashset.clone(),
+            &ref_counts,
             1,
         )
         .expect("dedup");
         let result = std::fs::read_to_string(&output_path).expect("read output");
-        let expected = "0,1,100,AAAA,REF|ALT,AAAA|ACAA,0|1,|TTT\n";
         assert_eq!(result, expected);
 
-        // min_alleles = 2 drops both variants.
+        // min_alleles = 2 drops both rows (one allele each).
         remove_ref_kmers(
             index_path.to_str().expect("path"),
             output_path.to_str().expect("path"),
-            ref_hashset,
+            &ref_counts,
             2,
         )
         .expect("dedup");
         let result = std::fs::read_to_string(&output_path).expect("read output");
         assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_remove_ref_kmers_two_tier_thresholds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let index_path = dir.path().join("index.txt");
+        let output_path = dir.path().join("dedup.txt");
+        // The same single-occurrence k-mer is kept in a REF allele but dropped
+        // in an ALT allele; any counted k-mer is dropped from both.
+        std::fs::write(
+            &index_path,
+            concat!(
+                "0,1,100,AAAA,REF|ALT2,AAAA|ACAA|AGAA,1|1|1,AAA|TTT|AAA\n",
+                "1,1,200,CCCC,REF|ALT,CCCC|CCGG,1|1,AAA|AAA\n",
+            ),
+        )
+        .expect("write index");
+        let mut ref_counts = HashMap::new();
+        ref_counts.insert("AAA".to_string(), 1);
+        remove_ref_kmers(
+            index_path.to_str().expect("path"),
+            output_path.to_str().expect("path"),
+            &ref_counts,
+            0,
+        )
+        .expect("dedup");
+        let result = std::fs::read_to_string(&output_path).expect("read output");
+        // Row 0: REF group AAA (count 1, own locus) and ALT group TTT
+        // (count 0, no occurrence) are both kept; ALT group AAA (count 1,
+        // a stray) is dropped.
+        let expected = concat!(
+            "0,1,100,AAAA,REF|ALT2,AAAA|ACAA|AGAA,1|1|0,AAA|TTT|\n",
+            "1,1,200,CCCC,REF|ALT,CCCC|CCGG,1|0,AAA|\n",
+        );
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_ref_counts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fasta_path = dir.path().join("ref.fasta");
+        // k = 5: ACGTA occurs on chromosome a twice (own canonical form);
+        // GGAAA occurs once; chromosome c is shorter than k and contributes
+        // nothing.
+        std::fs::write(
+            &fasta_path,
+            concat!(
+                ">a\n",
+                "ACGTAACGTAGGGG\n",
+                ">b\n",
+                "GGAAA\n",
+                ">c\n",
+                "AC\n",
+            ),
+        )
+        .expect("write fasta");
+        // .fai: name, length, offset, linebases, linewidth. Offsets account
+        // for each ">name\n" header line (3 bytes) before its sequence.
+        std::fs::write(
+            dir.path().join("ref.fasta.fai"),
+            "a\t14\t3\t14\t15\nb\t5\t21\t5\t6\nc\t2\t30\t2\t3\n",
+        )
+        .expect("write fai");
+        let counts = ref_counts(fasta_path.to_str().expect("path"), 5).expect("counts");
+        assert_eq!(counts.get("ACGTA"), Some(&2));
+        assert_eq!(counts.get("GGAAA"), Some(&1));
+        // "GGGG" plus shorter k-mers are not counted; only length-5 k-mers,
+        // of which ACGTA (at offsets 0 and 5) is the only duplicate.
+        assert_eq!(counts.get("AAAAA"), None);
+        let duplicated = counts.values().filter(|&&c| c > 1).count();
+        assert_eq!(duplicated, 1);
     }
 }

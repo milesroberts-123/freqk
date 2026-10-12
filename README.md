@@ -72,12 +72,12 @@ cd freqk
 # try freqk on small test dataset
 freqk index -f tests/test.fasta --vcf tests/test.vcf.gz -o index.txt -k 31
 freqk var-dedup --index index.txt --output var_index.txt
-freqk ref-dedup -i var_index.txt -o ref_index.txt -f tests/test.fasta --vcf tests/test.vcf.gz
+freqk ref-dedup -i var_index.txt -o ref_index.txt -f tests/test.fasta
 freqk count -i ref_index.txt -r tests/trimmed_paired_R1_1_0.fastq.gz,tests/trimmed_paired_R2_1_0.fastq.gz,tests/trimmed_unpaired_R1_1_0.fastq.gz,tests/trimmed_unpaired_R2_1_0.fastq.gz -n 4 -f counts_by_allele.txt -c counts_by_kmer.txt
 freqk call -i ref_index.txt -c counts_by_allele.txt -o calls.txt
 ```
 
-If the example was successful, the `md5sum` of the final calls.txt file should be `27c8de92b97963229c7cc8e4c3569ad6`
+If the example was successful, the `md5sum` of the final calls.txt file should be `ea5a558fc94766653a81d604755f04e4`
 
 ### step-by-step breakdown
 
@@ -93,9 +93,19 @@ The faster of the two deduplication steps is `var-dedup`. This simply scans thro
 
 `freqk var-dedup --index index.txt --output var_index.txt`
 
-The slower deduplication step is `ref-dedup`. This step removes any allele-specific k-mers that are found elsewhere in the reference sequence. 
+The slower deduplication step is `ref-dedup`. It counts how many times each
+k-mer occurs in the reference genome and removes k-mers that occur outside
+their own variant's locus: an ALT-allele k-mer can never match the reference
+at its own variant (its allele base differs from the reference base there),
+so any reference occurrence of one is a stray elsewhere and the k-mer is
+dropped; a REF-allele k-mer always matches the reference exactly at its own
+variant, so one occurrence is retained and only additional occurrences are
+treated as strays. A single occurrence of an ALT-allele k-mer elsewhere in
+the reference is enough to remove it, while a REF-allele k-mer tolerates its
+own-locus copy (i.e. REF k-mers are dropped at two or more occurrences, ALT
+k-mers at one or more).
 
-`freqk ref-dedup -i var_index.txt -o ref_index.txt -f tests/test.fasta --vcf tests/test.vcf.gz`
+`freqk ref-dedup -i var_index.txt -o ref_index.txt -f tests/test.fasta`
 
 3. Count the indexed k-mers in the pool-seq reads (multithreaded). 
 
