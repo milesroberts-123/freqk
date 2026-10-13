@@ -85,6 +85,22 @@
   seqs/counts (NA for unparseable/zero-sum pairs); README documents the
   de novo het-mers branch and its kmc/jellyfish-style input.
 
+- [x] ref-dedup (0.23.3): count only index k-mers instead of every canonical
+  k-mer in the reference, so memory scales with the index rather than the
+  genome (the old genome-wide String-keyed map needs hundreds of GB on a
+  mammalian-size reference). The reference is scanned in ~8 Mb segments per
+  work item — each fetch extends k-1 bases into the next segment and k-mer
+  ownership by start position keeps counts exact, so splits never
+  double-count or miss (unit-tested with 2-base segments and several thread
+  counts) — parallelized over a new `-n/--threads` flag (default 1). The
+  packed-u64 path for k <= 31 reuses count's ShardedCounts/increment;
+  k > 31 falls back to a KmerKey-keyed map with the same architecture.
+  Lookup semantics preserved exactly (canonical length-k keys only; other
+  lengths, non-ATGC k-mers and the empty pseudo-entry yield 0, like a lookup
+  in the former full map), so all contract md5s are unchanged; the old
+  genome-wide "unique canonical reference k-mers" stats line became an
+  index-scoped counter line.
+
 - [ ] add q-mers?
 
 - [x] debug ref-dedup: variants near chromosome ends need two regions extracted, region prior to the variant and the region between the variant and chromsome tip

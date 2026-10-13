@@ -114,6 +114,13 @@ enum Commands {
             help = "Drop index rows unless at least this many alleles have >= 1 allele-specific k-mer (0 keeps all rows)"
         )]
         min_alleles: usize,
+        #[arg(
+            short = 'n',
+            long = "threads",
+            default_value_t = 1,
+            help = "Number of threads to scan the reference with"
+        )]
+        nthreads: usize,
         #[command(flatten)]
         verbosity: clap_verbosity_flag::Verbosity,
     },
@@ -242,19 +249,21 @@ fn main() {
             output,
             fasta,
             min_alleles,
+            nthreads,
             ..
         } => {
             log::info!(
-                "Deduplicating index of reference k-mers: INDEX: {} OUTPUT: {} FASTA: {} MIN_ALLELES: {}",
+                "Deduplicating index of reference k-mers: INDEX: {} OUTPUT: {} FASTA: {} MIN_ALLELES: {} NTHREADS: {}",
                 index,
                 output,
                 fasta,
-                min_alleles
+                min_alleles,
+                nthreads
             );
             common::ensure_readable(index);
             common::ensure_readable(fasta);
             common::ensure_readable(&format!("{}.fai", fasta));
-            if let Err(e) = dedup::ref_dedup(index, fasta, output, *min_alleles) {
+            if let Err(e) = dedup::ref_dedup(index, fasta, output, *min_alleles, *nthreads) {
                 log::error!("ref-dedup failed: {}", e);
                 std::process::exit(1);
             }

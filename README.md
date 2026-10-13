@@ -105,7 +105,11 @@ the reference is enough to remove it, while a REF-allele k-mer tolerates its
 own-locus copy (i.e. REF k-mers are dropped at two or more occurrences, ALT
 k-mers at one or more).
 
-`freqk ref-dedup -i var_index.txt -o ref_index.txt -f tests/test.fasta`
+Only k-mers present in the index are counted, so memory scales with the
+index rather than the reference genome, and the reference itself is scanned
+in parallel segments (one thread by default, `-n`/`--threads` to use more):
+
+`freqk ref-dedup -i var_index.txt -o ref_index.txt -f tests/test.fasta -n 4`
 
 3. Count the indexed k-mers in the pool-seq reads (multithreaded). 
 
